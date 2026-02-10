@@ -140,11 +140,31 @@ export const UpdateConversationTagsInputSchema = z.object({
   conversationId: z.string()
     .min(1, 'conversationId is required')
     .regex(/^\d+$/, 'conversationId must be numeric'),
-  tags: z.array(z.string())
-    .describe('Array of tag names to set on the conversation. WARNING: This REPLACES all existing tags unless preserveExisting is true.'),
-  preserveExisting: z.boolean()
-    .default(false)
-    .describe('If true, fetches existing tags first and merges with new tags. Default: false (replace all).'),
+  tags: z.preprocess(
+    // Handle both string (JSON) and array inputs from MCP SDK
+    (val) => {
+      if (typeof val === 'string') {
+        try {
+          return JSON.parse(val);
+        } catch {
+          // If not valid JSON, treat as single tag
+          return [val];
+        }
+      }
+      return val;
+    },
+    z.array(z.string())
+  ).describe('Array of tag names to set on the conversation. WARNING: This REPLACES all existing tags unless preserveExisting is true.'),
+  preserveExisting: z.preprocess(
+    // Handle string "true"/"false" from MCP SDK
+    (val) => {
+      if (typeof val === 'string') {
+        return val === 'true';
+      }
+      return val;
+    },
+    z.boolean().default(false)
+  ).describe('If true, fetches existing tags first and merges with new tags. Default: false (replace all).'),
 });
 
 // Create Draft Reply Schema
