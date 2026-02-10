@@ -1302,17 +1302,11 @@ export class ToolHandler {
     }
 
     // The API returns 201 Created with Resource-ID header, body may be empty
-    let threadId: number | undefined;
-    try {
-      const response = await helpScoutClient.post<{ id?: number }>(
-        `/conversations/${input.conversationId}/reply`,
-        replyPayload
-      );
-      threadId = response?.id;
-    } catch (error) {
-      // If we get an error, re-throw it
-      throw error;
-    }
+    const response = await helpScoutClient.post<{ id?: number }>(
+      `/conversations/${input.conversationId}/reply`,
+      replyPayload
+    );
+    const threadId = response?.id;
 
     return {
       content: [
@@ -1364,16 +1358,11 @@ export class ToolHandler {
     }
 
     // POST to /conversations/{id}/notes endpoint
-    let noteId: number | undefined;
-    try {
-      const response = await helpScoutClient.post<{ id?: number }>(
-        `/conversations/${input.conversationId}/notes`,
-        notePayload
-      );
-      noteId = response?.id;
-    } catch (error) {
-      throw error;
-    }
+    const response = await helpScoutClient.post<{ id?: number }>(
+      `/conversations/${input.conversationId}/notes`,
+      notePayload
+    );
+    const noteId = response?.id;
 
     return {
       content: [
