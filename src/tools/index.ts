@@ -1482,6 +1482,11 @@ export class ToolHandler {
    * Create a new conversation as a draft email
    * IMPORTANT: This creates a brand new conversation, not a reply to existing
    * The draft will NOT be sent until manually reviewed and sent in Help Scout
+   *
+   * Two-step approach for reliability:
+   * 1. Create conversation with initial customer message (placeholder)
+   * 2. Add draft reply with the actual outbound message
+   *
    * @param args - Contains mailboxId, subject, recipientEmail, text, and optional fields
    * @returns Promise<CallToolResult> with operation result including new conversation ID
    */
@@ -1501,47 +1506,92 @@ export class ToolHandler {
       customer.lastName = input.recipientLastName;
     }
 
-    // Build the thread object for the draft
-    // Use type: "reply" with draft: true to create a draft outbound message
-    const thread: Record<string, unknown> = {
-      type: 'reply',
-      text: input.text,
-      draft: true, // CRITICAL: This makes it a draft, not sent
+    // Step 1: Create conversation with a minimal customer thread
+    // This represents an "inbound" message that we will reply to
+    const initialThread: Record<string, unknown> = {
+      type: 'customer',
+      customer,
+      text: '(Uitgaande e-mail - zie concept hieronder)',
     };
 
-    // Add user if specified
-    if (input.user) {
-      thread.user = input.user;
-    }
-
-    // Build the conversation payload
     const conversationPayload: Record<string, unknown> = {
       subject: input.subject,
       type: 'email',
       mailboxId: parseInt(input.mailboxId, 10),
-      status: 'pending', // Draft conversations should start as pending
+      status: 'active',
       customer,
-      threads: [thread],
-      imported: true, // Suppress notifications since this is a draft
-      autoReply: false, // Don't trigger auto-responses for drafts
+      threads: [initialThread],
+      autoReply: false,
     };
 
-    // Add optional fields
+    // Add optional tags
     if (input.tags && input.tags.length > 0) {
       conversationPayload.tags = input.tags;
     }
 
+    // Add assignment
     if (input.assignTo) {
       conversationPayload.assignTo = input.assignTo;
     }
 
-    // Make the API request
-    // The API returns 201 Created with Resource-ID header containing the new conversation ID
-    const response = await helpScoutClient.post<{ id?: number }>(
+    // Create the conversation
+    const createResponse = await helpScoutClient.post<{ id?: number }>(
       '/conversations',
       conversationPayload
     );
-    const conversationId = response?.id?.toString();
+
+    const conversationId = createResponse?.id;
+
+    if (!conversationId) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: 'Failed to create conversation - no ID returned from API',
+              suggestion: 'Check Help Scout API permissions and mailbox access',
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    // Step 2: Add draft reply with the actual message content
+    const draftPayload: Record<string, unknown> = {
+      customer: { id: 0 }, // Will be populated by fetching conversation
+      text: input.text,
+      draft: true,
+    };
+
+    if (input.user) {
+      draftPayload.user = input.user;
+    }
+
+    // Fetch the conversation to get the customer ID
+    try {
+      const conversation = await helpScoutClient.get<{ primaryCustomer?: { id: number }; customer?: { id: number } }>(
+        `/conversations/${conversationId}`
+      );
+
+      const customerId = conversation.primaryCustomer?.id || conversation.customer?.id;
+
+      if (customerId) {
+        draftPayload.customer = { id: customerId };
+      }
+    } catch (fetchError) {
+      logger.warn('Could not fetch conversation for customer ID, using email instead', {
+        conversationId,
+        error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+      });
+      draftPayload.customer = { email: input.recipientEmail };
+    }
+
+    // Add the draft reply
+    await helpScoutClient.post<{ id?: number }>(
+      `/conversations/${conversationId}/reply`,
+      draftPayload
+    );
 
     return {
       content: [
@@ -1549,7 +1599,7 @@ export class ToolHandler {
           type: 'text',
           text: JSON.stringify({
             success: true,
-            conversationId: conversationId,
+            conversationId: conversationId.toString(),
             mailboxId: input.mailboxId,
             subject: input.subject,
             recipientEmail: input.recipientEmail,
@@ -1559,21 +1609,20 @@ export class ToolHandler {
               'This is a DRAFT only - it has NOT been sent to the customer',
               'A human must review and manually send this email in Help Scout',
               'The recipient has NOT received this message',
-              'The conversation has been created in "pending" status',
+              'The conversation appears in your "Active" inbox with a draft reply',
               input.tags && input.tags.length > 0 ? `Tags applied: ${input.tags.join(', ')}` : null,
               input.assignTo ? `Assigned to user ID: ${input.assignTo}` : null,
             ].filter(Boolean),
             nextSteps: [
-              'Review the draft in Help Scout dashboard',
-              'Edit the message if necessary before sending',
-              'Click "Send" in Help Scout to deliver to the customer',
-              conversationId ? `You can use getConversationSummary with conversationId "${conversationId}" to verify the draft` : null,
-            ].filter(Boolean),
+              'Open Help Scout and find the conversation',
+              'Review and edit the draft reply if needed',
+              'Click "Send" to deliver the email to the customer',
+              `Direct link: https://secure.helpscout.net/conversation/${conversationId}`,
+            ],
             customerInfo: {
               email: input.recipientEmail,
               firstName: input.recipientFirstName || null,
               lastName: input.recipientLastName || null,
-              note: 'If this email did not match an existing customer, a new customer record was created',
             },
           }, null, 2),
         },

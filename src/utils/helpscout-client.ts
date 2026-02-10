@@ -468,14 +468,24 @@ export class HelpScoutClient {
    * Make a POST request to the Help Scout API
    * @param endpoint - API endpoint path
    * @param data - Request body data
-   * @returns Promise with response data
+   * @returns Promise with response data, including Resource-ID from headers if present
    */
-  async post<T>(endpoint: string, data: unknown): Promise<T> {
+  async post<T>(endpoint: string, data: unknown): Promise<T & { id?: number }> {
     const response = await this.executeWithRetry<T>(() =>
       this.client.post<T>(endpoint, data)
     );
 
-    return response.data;
+    // HelpScout returns created resource ID in the Resource-ID header
+    // Extract it and include in the response for convenience
+    const resourceId = response.headers['resource-id'];
+
+    if (resourceId) {
+      const id = parseInt(resourceId, 10);
+      logger.debug('Resource created with ID from header', { resourceId: id, endpoint });
+      return { ...response.data, id } as T & { id?: number };
+    }
+
+    return response.data as T & { id?: number };
   }
 
   /**
