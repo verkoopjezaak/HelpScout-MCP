@@ -58,6 +58,7 @@ import {
   CreateDraftReplyInputSchema,
   CreateNoteInputSchema,
   UpdateConversationStatusInputSchema,
+  CreateDraftConversationInputSchema,
 } from '../schema/types.js';
 
 export class ToolHandler {
@@ -440,6 +441,53 @@ export class ToolHandler {
           required: ['conversationId', 'status'],
         },
       },
+      {
+        name: 'createDraftConversation',
+        description: 'Create a NEW conversation as a DRAFT email to a customer. IMPORTANT: This creates a brand new conversation (not a reply to existing). The draft will NOT be sent until manually reviewed and sent by a human in Help Scout. Use this when you need to prepare a new outbound email for human review. PREREQUISITE: You must know the mailboxId - use listAllInboxes or searchInboxes first if needed.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mailboxId: {
+              type: 'string',
+              description: 'The inbox ID where the conversation will be created. REQUIRED. Use listAllInboxes or searchInboxes to get valid IDs.',
+            },
+            subject: {
+              type: 'string',
+              description: 'The subject line for the new conversation',
+            },
+            recipientEmail: {
+              type: 'string',
+              description: 'Email address of the recipient. If no matching customer exists, a new customer will be created.',
+            },
+            text: {
+              type: 'string',
+              description: 'The HTML or plain text content of the draft email. Supports basic HTML formatting.',
+            },
+            recipientFirstName: {
+              type: 'string',
+              description: 'Optional: First name of the recipient (used when creating new customer)',
+            },
+            recipientLastName: {
+              type: 'string',
+              description: 'Optional: Last name of the recipient (used when creating new customer)',
+            },
+            user: {
+              type: 'number',
+              description: 'Optional: User ID who is creating the draft. If omitted, uses the authenticated user.',
+            },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional: Array of tag names to apply to the conversation',
+            },
+            assignTo: {
+              type: 'number',
+              description: 'Optional: User ID to assign the conversation to',
+            },
+          },
+          required: ['mailboxId', 'subject', 'recipientEmail', 'text'],
+        },
+      },
     ];
   }
 
@@ -534,6 +582,9 @@ export class ToolHandler {
           break;
         case 'updateConversationStatus':
           result = await this.updateConversationStatus(request.params.arguments || {});
+          break;
+        case 'createDraftConversation':
+          result = await this.createDraftConversation(request.params.arguments || {});
           break;
         default:
           throw new Error(`Unknown tool: ${request.params.name}`);
@@ -1420,6 +1471,109 @@ export class ToolHandler {
               pending: 'Waiting for customer response',
               closed: 'Conversation handled, removed from active inbox',
               spam: 'Marked as spam',
+            },
+          }, null, 2),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Create a new conversation as a draft email
+   * IMPORTANT: This creates a brand new conversation, not a reply to existing
+   * The draft will NOT be sent until manually reviewed and sent in Help Scout
+   * @param args - Contains mailboxId, subject, recipientEmail, text, and optional fields
+   * @returns Promise<CallToolResult> with operation result including new conversation ID
+   */
+  private async createDraftConversation(args: unknown): Promise<CallToolResult> {
+    const input = CreateDraftConversationInputSchema.parse(args);
+
+    // Build the customer object
+    const customer: Record<string, unknown> = {
+      email: input.recipientEmail,
+    };
+
+    // Add optional customer fields if provided
+    if (input.recipientFirstName) {
+      customer.firstName = input.recipientFirstName;
+    }
+    if (input.recipientLastName) {
+      customer.lastName = input.recipientLastName;
+    }
+
+    // Build the thread object for the draft
+    // Use type: "reply" with draft: true to create a draft outbound message
+    const thread: Record<string, unknown> = {
+      type: 'reply',
+      text: input.text,
+      draft: true, // CRITICAL: This makes it a draft, not sent
+    };
+
+    // Add user if specified
+    if (input.user) {
+      thread.user = input.user;
+    }
+
+    // Build the conversation payload
+    const conversationPayload: Record<string, unknown> = {
+      subject: input.subject,
+      type: 'email',
+      mailboxId: parseInt(input.mailboxId, 10),
+      status: 'pending', // Draft conversations should start as pending
+      customer,
+      threads: [thread],
+      imported: true, // Suppress notifications since this is a draft
+      autoReply: false, // Don't trigger auto-responses for drafts
+    };
+
+    // Add optional fields
+    if (input.tags && input.tags.length > 0) {
+      conversationPayload.tags = input.tags;
+    }
+
+    if (input.assignTo) {
+      conversationPayload.assignTo = input.assignTo;
+    }
+
+    // Make the API request
+    // The API returns 201 Created with Resource-ID header containing the new conversation ID
+    const response = await helpScoutClient.post<{ id?: number }>(
+      '/conversations',
+      conversationPayload
+    );
+    const conversationId = response?.id?.toString();
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            conversationId: conversationId,
+            mailboxId: input.mailboxId,
+            subject: input.subject,
+            recipientEmail: input.recipientEmail,
+            draftStatus: 'DRAFT_CONVERSATION_CREATED',
+            message: 'New draft conversation created successfully. This draft email will NOT be sent to the customer until manually reviewed and sent by a human in Help Scout.',
+            importantNotes: [
+              'This is a DRAFT only - it has NOT been sent to the customer',
+              'A human must review and manually send this email in Help Scout',
+              'The recipient has NOT received this message',
+              'The conversation has been created in "pending" status',
+              input.tags && input.tags.length > 0 ? `Tags applied: ${input.tags.join(', ')}` : null,
+              input.assignTo ? `Assigned to user ID: ${input.assignTo}` : null,
+            ].filter(Boolean),
+            nextSteps: [
+              'Review the draft in Help Scout dashboard',
+              'Edit the message if necessary before sending',
+              'Click "Send" in Help Scout to deliver to the customer',
+              conversationId ? `You can use getConversationSummary with conversationId "${conversationId}" to verify the draft` : null,
+            ].filter(Boolean),
+            customerInfo: {
+              email: input.recipientEmail,
+              firstName: input.recipientFirstName || null,
+              lastName: input.recipientLastName || null,
+              note: 'If this email did not match an existing customer, a new customer record was created',
             },
           }, null, 2),
         },

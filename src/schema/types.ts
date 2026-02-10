@@ -185,6 +185,41 @@ export const UpdateConversationStatusInputSchema = z.object({
     .describe('The new status for the conversation'),
 });
 
+// Create Draft Conversation Schema (new conversation as draft)
+export const CreateDraftConversationInputSchema = z.object({
+  mailboxId: z.string()
+    .min(1, 'mailboxId is required')
+    .regex(/^\d+$/, 'mailboxId must be numeric')
+    .describe('The inbox ID where the conversation will be created. Use listAllInboxes or searchInboxes to find valid IDs.'),
+  subject: z.string()
+    .min(1, 'Subject is required')
+    .max(255, 'Subject cannot exceed 255 characters')
+    .describe('The subject line for the new conversation'),
+  recipientEmail: z.string()
+    .email('Must be a valid email address')
+    .describe('Email address of the recipient (customer). If customer does not exist, one will be created.'),
+  text: z.string()
+    .min(1, 'Message text is required')
+    .describe('The HTML or plain text content of the draft email'),
+  recipientFirstName: z.string()
+    .max(40, 'First name cannot exceed 40 characters')
+    .optional()
+    .describe('Optional: First name of the recipient (used if creating new customer)'),
+  recipientLastName: z.string()
+    .max(40, 'Last name cannot exceed 40 characters')
+    .optional()
+    .describe('Optional: Last name of the recipient (used if creating new customer)'),
+  user: z.number()
+    .optional()
+    .describe('Optional: User ID who is creating the draft. If omitted, uses authenticated user.'),
+  tags: z.array(z.string())
+    .optional()
+    .describe('Optional: Array of tag names to apply to the conversation'),
+  assignTo: z.number()
+    .optional()
+    .describe('Optional: User ID to assign the conversation to'),
+});
+
 // Response Types
 export const ServerTimeSchema = z.object({
   isoTime: z.string(),
@@ -212,5 +247,6 @@ export type UpdateConversationTagsInput = z.infer<typeof UpdateConversationTagsI
 export type CreateDraftReplyInput = z.infer<typeof CreateDraftReplyInputSchema>;
 export type CreateNoteInput = z.infer<typeof CreateNoteInputSchema>;
 export type UpdateConversationStatusInput = z.infer<typeof UpdateConversationStatusInputSchema>;
+export type CreateDraftConversationInput = z.infer<typeof CreateDraftConversationInputSchema>;
 export type ServerTime = z.infer<typeof ServerTimeSchema>;
 export type ApiError = z.infer<typeof ErrorSchema>;

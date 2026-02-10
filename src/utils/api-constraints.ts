@@ -39,6 +39,8 @@ export class HelpScoutAPIConstraints {
         return this.validateConversationSummary(args);
       case 'getThreads':
         return this.validateGetThreads(args);
+      case 'createDraftConversation':
+        return this.validateCreateDraftConversation(args, previousCalls);
       default:
         return { isValid: true, errors: [], suggestions: [] };
     }
@@ -169,15 +171,69 @@ export class HelpScoutAPIConstraints {
   private static validateGetThreads(args: Record<string, unknown>): ValidationResult {
     const errors: string[] = [];
     const suggestions: string[] = [];
-    
+
     if (!args.conversationId || typeof args.conversationId !== 'string') {
       errors.push('conversationId is required');
       suggestions.push('Get conversation ID from searchConversations results first');
     }
-    
+
     return { isValid: errors.length === 0, errors, suggestions };
   }
-  
+
+  /**
+   * Validate createDraftConversation calls
+   */
+  private static validateCreateDraftConversation(
+    args: Record<string, unknown>,
+    previousCalls: string[]
+  ): ValidationResult {
+    const errors: string[] = [];
+    const suggestions: string[] = [];
+    const requiredPrerequisites: string[] = [];
+
+    // Validate mailboxId format
+    if (!args.mailboxId || typeof args.mailboxId !== 'string') {
+      errors.push('mailboxId is required');
+      suggestions.push('Use listAllInboxes or searchInboxes to get a valid mailbox ID');
+      requiredPrerequisites.push('listAllInboxes');
+    } else if (!/^\d+$/.test(args.mailboxId)) {
+      errors.push('Invalid mailboxId format - should be numeric');
+      suggestions.push('Mailbox IDs from Help Scout are numeric strings. Use listAllInboxes to get the correct ID.');
+    }
+
+    // Check if user might need inbox info first
+    const hasSearchedInboxes = previousCalls.includes('searchInboxes') || previousCalls.includes('listAllInboxes');
+    if (!hasSearchedInboxes && args.mailboxId) {
+      suggestions.push('TIP: If unsure about mailbox ID, call listAllInboxes first to see available inboxes');
+    }
+
+    // Validate required fields
+    if (!args.subject || typeof args.subject !== 'string' || (args.subject as string).trim() === '') {
+      errors.push('subject is required and cannot be empty');
+    }
+
+    if (!args.recipientEmail || typeof args.recipientEmail !== 'string') {
+      errors.push('recipientEmail is required');
+    } else {
+      // Basic email format validation
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(args.recipientEmail as string)) {
+        errors.push('recipientEmail must be a valid email address');
+      }
+    }
+
+    if (!args.text || typeof args.text !== 'string' || (args.text as string).trim() === '') {
+      errors.push('text (message body) is required and cannot be empty');
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors,
+      suggestions,
+      requiredPrerequisites: requiredPrerequisites.length > 0 ? requiredPrerequisites : undefined
+    };
+  }
+
   /**
    * Detect if user query mentions an inbox by name
    */
