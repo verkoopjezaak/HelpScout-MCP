@@ -135,6 +135,56 @@ export const MultiStatusConversationSearchInputSchema = z.object({
   includeVariations: z.boolean().default(true),
 });
 
+// Update Conversation Tags Schema
+export const UpdateConversationTagsInputSchema = z.object({
+  conversationId: z.string()
+    .min(1, 'conversationId is required')
+    .regex(/^\d+$/, 'conversationId must be numeric'),
+  tags: z.array(z.string())
+    .describe('Array of tag names to set on the conversation. WARNING: This REPLACES all existing tags unless preserveExisting is true.'),
+  preserveExisting: z.boolean()
+    .default(false)
+    .describe('If true, fetches existing tags first and merges with new tags. Default: false (replace all).'),
+});
+
+// Create Draft Reply Schema
+export const CreateDraftReplyInputSchema = z.object({
+  conversationId: z.string()
+    .min(1, 'conversationId is required')
+    .regex(/^\d+$/, 'conversationId must be numeric'),
+  text: z.string()
+    .min(1, 'Reply text is required')
+    .describe('The HTML or plain text content of the draft reply'),
+  user: z.number()
+    .optional()
+    .describe('User ID who is creating the draft. If omitted, uses authenticated user.'),
+  status: z.enum(['active', 'pending', 'closed', 'spam'])
+    .optional()
+    .describe('Status to set on the conversation AFTER the reply is sent. Use "closed" to automatically close the conversation when the draft is sent.'),
+});
+
+// Create Note Schema (internal notes not visible to customer)
+export const CreateNoteInputSchema = z.object({
+  conversationId: z.string()
+    .min(1, 'conversationId is required')
+    .regex(/^\d+$/, 'conversationId must be numeric'),
+  text: z.string()
+    .min(1, 'Note text is required')
+    .describe('The text content of the internal note. Supports basic HTML formatting.'),
+  user: z.number()
+    .optional()
+    .describe('User ID who is creating the note. If omitted, uses authenticated user.'),
+});
+
+// Update Conversation Status Schema
+export const UpdateConversationStatusInputSchema = z.object({
+  conversationId: z.string()
+    .min(1, 'conversationId is required')
+    .regex(/^\d+$/, 'conversationId must be numeric'),
+  status: z.enum(['active', 'pending', 'closed', 'spam'])
+    .describe('The new status for the conversation'),
+});
+
 // Response Types
 export const ServerTimeSchema = z.object({
   isoTime: z.string(),
@@ -158,5 +208,9 @@ export type GetThreadsInput = z.infer<typeof GetThreadsInputSchema>;
 export type GetConversationSummaryInput = z.infer<typeof GetConversationSummaryInputSchema>;
 export type AdvancedConversationSearchInput = z.infer<typeof AdvancedConversationSearchInputSchema>;
 export type MultiStatusConversationSearchInput = z.infer<typeof MultiStatusConversationSearchInputSchema>;
+export type UpdateConversationTagsInput = z.infer<typeof UpdateConversationTagsInputSchema>;
+export type CreateDraftReplyInput = z.infer<typeof CreateDraftReplyInputSchema>;
+export type CreateNoteInput = z.infer<typeof CreateNoteInputSchema>;
+export type UpdateConversationStatusInput = z.infer<typeof UpdateConversationStatusInputSchema>;
 export type ServerTime = z.infer<typeof ServerTimeSchema>;
 export type ApiError = z.infer<typeof ErrorSchema>;

@@ -445,6 +445,58 @@ export class HelpScoutClient {
     return 300; // Default 5 minutes
   }
 
+  /**
+   * Make a PUT request to the Help Scout API
+   * @param endpoint - API endpoint path
+   * @param data - Request body data
+   * @returns Promise with response data (may be empty for 204 responses)
+   */
+  async put<T>(endpoint: string, data: unknown): Promise<T | void> {
+    const response = await this.executeWithRetry<T>(() =>
+      this.client.put<T>(endpoint, data)
+    );
+
+    // 204 No Content responses have no body
+    if (response.status === 204) {
+      return;
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Make a POST request to the Help Scout API
+   * @param endpoint - API endpoint path
+   * @param data - Request body data
+   * @returns Promise with response data
+   */
+  async post<T>(endpoint: string, data: unknown): Promise<T> {
+    const response = await this.executeWithRetry<T>(() =>
+      this.client.post<T>(endpoint, data)
+    );
+
+    return response.data;
+  }
+
+  /**
+   * Make a PATCH request to the Help Scout API
+   * @param endpoint - API endpoint path
+   * @param data - Request body data
+   * @returns Promise with response data (may be empty for 204 responses)
+   */
+  async patch<T>(endpoint: string, data: unknown): Promise<T | void> {
+    const response = await this.executeWithRetry<T>(() =>
+      this.client.patch<T>(endpoint, data)
+    );
+
+    // 204 No Content responses have no body
+    if (response.status === 204) {
+      return;
+    }
+
+    return response.data;
+  }
+
   async testConnection(): Promise<boolean> {
     try {
       await this.get('/mailboxes', { page: 1, size: 1 });

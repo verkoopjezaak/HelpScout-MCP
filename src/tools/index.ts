@@ -54,6 +54,10 @@ import {
   GetConversationSummaryInputSchema,
   AdvancedConversationSearchInputSchema,
   MultiStatusConversationSearchInputSchema,
+  UpdateConversationTagsInputSchema,
+  CreateDraftReplyInputSchema,
+  CreateNoteInputSchema,
+  UpdateConversationStatusInputSchema,
 } from '../schema/types.js';
 
 export class ToolHandler {
@@ -344,6 +348,98 @@ export class ToolHandler {
           required: ['searchTerms'],
         },
       },
+      {
+        name: 'updateConversationTags',
+        description: 'Update tags on a conversation. CRITICAL: By default, this REPLACES all existing tags. Use preserveExisting: true to merge new tags with existing ones. This is useful for categorizing, prioritizing, or organizing conversations.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: {
+              type: 'string',
+              description: 'The conversation ID to update tags for (must be numeric)',
+            },
+            tags: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Array of tag names to set. WARNING: Without preserveExisting, this replaces ALL tags.',
+            },
+            preserveExisting: {
+              type: 'boolean',
+              default: false,
+              description: 'If true, fetches existing tags and merges with new tags. If false (default), replaces all tags.',
+            },
+          },
+          required: ['conversationId', 'tags'],
+        },
+      },
+      {
+        name: 'createDraftReply',
+        description: 'Create a DRAFT reply to a conversation. IMPORTANT: This creates a draft only - it will NOT be sent to the customer until manually reviewed and sent by a human in Help Scout. Use this for preparing responses that need human review before sending. You can optionally set a status that will be applied when the draft is sent.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: {
+              type: 'string',
+              description: 'The conversation ID to add a draft reply to (must be numeric)',
+            },
+            text: {
+              type: 'string',
+              description: 'The HTML or plain text content of the draft reply. Supports basic HTML formatting.',
+            },
+            user: {
+              type: 'number',
+              description: 'Optional: User ID to associate with the draft. If omitted, uses the authenticated user.',
+            },
+            status: {
+              type: 'string',
+              enum: ['active', 'pending', 'closed', 'spam'],
+              description: 'Optional: Status to set on the conversation AFTER the reply is sent. Use "closed" to automatically close the conversation when the draft is sent manually.',
+            },
+          },
+          required: ['conversationId', 'text'],
+        },
+      },
+      {
+        name: 'createNote',
+        description: 'Create an internal note on a conversation. IMPORTANT: Notes are INTERNAL ONLY - they are NOT visible to the customer. Use notes to document decisions, track follow-up dates, record context, or communicate with team members. Examples: "Wachten tot 5 feb na call met klant", "Klant gebeld, geen gehoor", "Beslissing: eerst X afwachten".',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: {
+              type: 'string',
+              description: 'The conversation ID to add a note to (must be numeric)',
+            },
+            text: {
+              type: 'string',
+              description: 'The text content of the internal note. Supports basic HTML formatting. Use clear language to document decisions, follow-up dates, or context for team members.',
+            },
+            user: {
+              type: 'number',
+              description: 'Optional: User ID to associate with the note. If omitted, uses the authenticated user.',
+            },
+          },
+          required: ['conversationId', 'text'],
+        },
+      },
+      {
+        name: 'updateConversationStatus',
+        description: 'Update the status of a conversation. Use this to close conversations that have been handled, or change status to pending/active. Common use case: close a conversation after adding a note when another team member (e.g., Bernd) will handle it outside of HelpScout.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: {
+              type: 'string',
+              description: 'The conversation ID to update (must be numeric)',
+            },
+            status: {
+              type: 'string',
+              enum: ['active', 'pending', 'closed', 'spam'],
+              description: 'The new status for the conversation. Use "closed" to remove from active inbox.',
+            },
+          },
+          required: ['conversationId', 'status'],
+        },
+      },
     ];
   }
 
@@ -426,6 +522,18 @@ export class ToolHandler {
           break;
         case 'comprehensiveConversationSearch':
           result = await this.comprehensiveConversationSearch(request.params.arguments || {});
+          break;
+        case 'updateConversationTags':
+          result = await this.updateConversationTags(request.params.arguments || {});
+          break;
+        case 'createDraftReply':
+          result = await this.createDraftReply(request.params.arguments || {});
+          break;
+        case 'createNote':
+          result = await this.createNote(request.params.arguments || {});
+          break;
+        case 'updateConversationStatus':
+          result = await this.updateConversationStatus(request.params.arguments || {});
           break;
         default:
           throw new Error(`Unknown tool: ${request.params.name}`);
@@ -1033,6 +1141,300 @@ export class ToolHandler {
         'Consider searching without status restrictions first',
         'Verify that conversations exist for the specified criteria'
       ] : undefined,
+    };
+  }
+
+  /**
+   * Update tags on a conversation
+   * @param args - Contains conversationId, tags array, and optional preserveExisting flag
+   * @returns Promise<CallToolResult> with operation result
+   */
+  private async updateConversationTags(args: unknown): Promise<CallToolResult> {
+    const input = UpdateConversationTagsInputSchema.parse(args);
+
+    let finalTags = input.tags;
+
+    // If preserveExisting is true, fetch current tags and merge
+    if (input.preserveExisting) {
+      try {
+        const conversation = await helpScoutClient.get<Conversation>(
+          `/conversations/${input.conversationId}`
+        );
+        const existingTagNames = (conversation.tags || []).map(tag => tag.name);
+        // Merge and deduplicate
+        finalTags = [...new Set([...existingTagNames, ...input.tags])];
+      } catch (error) {
+        logger.warn('Could not fetch existing tags, proceeding with provided tags only', {
+          conversationId: input.conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Help Scout API expects tags as an array of strings
+    await helpScoutClient.put<void>(
+      `/conversations/${input.conversationId}/tags`,
+      { tags: finalTags }
+    );
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            conversationId: input.conversationId,
+            updatedTags: finalTags,
+            preservedExisting: input.preserveExisting,
+            message: input.preserveExisting
+              ? 'Tags merged with existing tags successfully'
+              : 'Tags replaced successfully',
+            nextSteps: [
+              'Use getConversationSummary to verify the tags were updated',
+              'Use searchConversations with tag filter to find conversations with these tags',
+            ],
+          }, null, 2),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Create a draft reply to a conversation
+   * IMPORTANT: This only creates a draft - it will NOT send to the customer
+   * @param args - Contains conversationId, text, and optional user
+   * @returns Promise<CallToolResult> with operation result
+   */
+  private async createDraftReply(args: unknown): Promise<CallToolResult> {
+    const input = CreateDraftReplyInputSchema.parse(args);
+
+    // First, fetch the conversation to get the customer ID (required by API)
+    // The API returns primaryCustomer for some responses, customer for others
+    const conversation = await helpScoutClient.get<Conversation & { primaryCustomer?: { id: number } }>(
+      `/conversations/${input.conversationId}`
+    );
+
+    // Try primaryCustomer first (from list responses), then customer (from single get)
+    const customerId = conversation.primaryCustomer?.id || conversation.customer?.id;
+
+    if (!customerId) {
+      // If still no customer, try to get it from threads
+      const threadsResponse = await helpScoutClient.get<PaginatedResponse<Thread>>(
+        `/conversations/${input.conversationId}/threads`,
+        { page: 1, size: 10 }
+      );
+      const threads = threadsResponse._embedded?.threads || [];
+      const customerThread = threads.find(t => t.customer?.id);
+
+      if (!customerThread?.customer?.id) {
+        throw new Error(`Could not find customer ID for conversation ${input.conversationId}`);
+      }
+
+      // Build the reply payload with customer from thread
+      const replyPayload: Record<string, unknown> = {
+        customer: {
+          id: customerThread.customer.id,
+        },
+        text: input.text,
+        draft: true, // CRITICAL: Always create as draft, never send directly
+      };
+
+      if (input.user) {
+        replyPayload.user = input.user;
+      }
+
+      // Add status if provided - this will be applied when the draft is sent
+      if (input.status) {
+        replyPayload.status = input.status;
+      }
+
+      const response = await helpScoutClient.post<{ id?: number }>(
+        `/conversations/${input.conversationId}/reply`,
+        replyPayload
+      );
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              conversationId: input.conversationId,
+              threadId: response?.id,
+              draftStatus: 'DRAFT_CREATED',
+              statusAfterSend: input.status || 'unchanged',
+              message: input.status
+                ? `Draft reply created successfully. When sent, conversation will be set to "${input.status}".`
+                : 'Draft reply created successfully. This draft will NOT be sent to the customer until manually reviewed and sent by a human in Help Scout.',
+              importantNotes: [
+                'This is a DRAFT only - it has NOT been sent',
+                'A human must review and manually send this reply in Help Scout',
+                'The customer has NOT received this message',
+                input.status ? `When sent, conversation status will change to: ${input.status}` : null,
+              ].filter(Boolean),
+              nextSteps: [
+                'Review the draft in Help Scout dashboard',
+                'Edit if necessary before sending',
+                'Click "Send" in Help Scout to deliver to customer',
+              ],
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    // Build the reply payload - draft: true is CRITICAL
+    const replyPayload: Record<string, unknown> = {
+      customer: {
+        id: customerId,
+      },
+      text: input.text,
+      draft: true, // CRITICAL: Always create as draft, never send directly
+    };
+
+    if (input.user) {
+      replyPayload.user = input.user;
+    }
+
+    // Add status if provided - this will be applied when the draft is sent
+    if (input.status) {
+      replyPayload.status = input.status;
+    }
+
+    // The API returns 201 Created with Resource-ID header, body may be empty
+    let threadId: number | undefined;
+    try {
+      const response = await helpScoutClient.post<{ id?: number }>(
+        `/conversations/${input.conversationId}/reply`,
+        replyPayload
+      );
+      threadId = response?.id;
+    } catch (error) {
+      // If we get an error, re-throw it
+      throw error;
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            conversationId: input.conversationId,
+            threadId: threadId,
+            draftStatus: 'DRAFT_CREATED',
+            statusAfterSend: input.status || 'unchanged',
+            message: input.status
+              ? `Draft reply created successfully. When sent, conversation will be set to "${input.status}".`
+              : 'Draft reply created successfully. This draft will NOT be sent to the customer until manually reviewed and sent by a human in Help Scout.',
+            importantNotes: [
+              'This is a DRAFT only - it has NOT been sent',
+              'A human must review and manually send this reply in Help Scout',
+              'The customer has NOT received this message',
+              input.status ? `When sent, conversation status will change to: ${input.status}` : null,
+            ].filter(Boolean),
+            nextSteps: [
+              'Review the draft in Help Scout dashboard',
+              'Edit if necessary before sending',
+              'Click "Send" in Help Scout to deliver to customer',
+            ],
+          }, null, 2),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Create an internal note on a conversation
+   * IMPORTANT: Notes are internal only - NOT visible to customers
+   * Use for documenting decisions, follow-up dates, or team communication
+   * @param args - Contains conversationId, text, and optional user
+   * @returns Promise<CallToolResult> with operation result
+   */
+  private async createNote(args: unknown): Promise<CallToolResult> {
+    const input = CreateNoteInputSchema.parse(args);
+
+    // Build the note payload
+    const notePayload: Record<string, unknown> = {
+      text: input.text,
+    };
+
+    if (input.user) {
+      notePayload.user = input.user;
+    }
+
+    // POST to /conversations/{id}/notes endpoint
+    let noteId: number | undefined;
+    try {
+      const response = await helpScoutClient.post<{ id?: number }>(
+        `/conversations/${input.conversationId}/notes`,
+        notePayload
+      );
+      noteId = response?.id;
+    } catch (error) {
+      throw error;
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            conversationId: input.conversationId,
+            noteId: noteId,
+            status: 'NOTE_CREATED',
+            message: 'Internal note created successfully. This note is ONLY visible to team members, NOT to the customer.',
+            importantNotes: [
+              'This is an INTERNAL note - the customer cannot see it',
+              'Use notes to document decisions, follow-up dates, or team context',
+              'Notes are visible in the conversation timeline in Help Scout',
+            ],
+            useCases: [
+              'Track follow-up dates: "Wachten tot 5 feb na call"',
+              'Document decisions: "Beslissing: activa deal met take-it-or-leave-it"',
+              'Record context: "Klant gebeld, belt morgen terug"',
+              'Team communication: "Bernd pakt dit op maandag"',
+            ],
+          }, null, 2),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Update the status of a conversation
+   * Use to close conversations or change their status
+   * @param args - Contains conversationId and status
+   * @returns Promise<CallToolResult> with operation result
+   */
+  private async updateConversationStatus(args: unknown): Promise<CallToolResult> {
+    const input = UpdateConversationStatusInputSchema.parse(args);
+
+    // PATCH to /conversations/{id} endpoint with status
+    await helpScoutClient.patch<void>(
+      `/conversations/${input.conversationId}`,
+      { op: 'replace', path: '/status', value: input.status }
+    );
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            conversationId: input.conversationId,
+            newStatus: input.status,
+            message: `Conversation status updated to "${input.status}" successfully.`,
+            statusMeanings: {
+              active: 'Conversation needs attention, visible in main inbox',
+              pending: 'Waiting for customer response',
+              closed: 'Conversation handled, removed from active inbox',
+              spam: 'Marked as spam',
+            },
+          }, null, 2),
+        },
+      ],
     };
   }
 }
