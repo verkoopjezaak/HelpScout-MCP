@@ -43,6 +43,8 @@ const TOOL_CONSTANTS = {
     SPAM: 'spam'
   } as const
 } as const;
+import { mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import {
   Inbox,
   Conversation,
@@ -59,6 +61,8 @@ import {
   CreateNoteInputSchema,
   UpdateConversationStatusInputSchema,
   CreateDraftConversationInputSchema,
+  ListAttachmentsInputSchema,
+  DownloadAttachmentInputSchema,
 } from '../schema/types.js';
 
 export class ToolHandler {
@@ -488,6 +492,42 @@ export class ToolHandler {
           required: ['mailboxId', 'subject', 'recipientEmail', 'text'],
         },
       },
+      {
+        name: 'listAttachments',
+        description: 'List all attachments in a conversation. Returns attachment metadata (id, filename, mimeType, size) from all threads. Use this to discover attachments before downloading them.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: {
+              type: 'string',
+              description: 'The conversation ID to list attachments for',
+            },
+          },
+          required: ['conversationId'],
+        },
+      },
+      {
+        name: 'downloadAttachment',
+        description: 'Download an attachment from a conversation and save it to disk. Returns the file path, filename, size, and mimeType. Use listAttachments first to get the attachmentId.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: {
+              type: 'string',
+              description: 'The conversation ID containing the attachment',
+            },
+            attachmentId: {
+              type: 'string',
+              description: 'The attachment ID to download (get this from listAttachments)',
+            },
+            savePath: {
+              type: 'string',
+              description: 'Directory path to save the file (default: /tmp/helpscout-attachments/)',
+            },
+          },
+          required: ['conversationId', 'attachmentId'],
+        },
+      },
     ];
   }
 
@@ -585,6 +625,12 @@ export class ToolHandler {
           break;
         case 'createDraftConversation':
           result = await this.createDraftConversation(request.params.arguments || {});
+          break;
+        case 'listAttachments':
+          result = await this.listAttachments(request.params.arguments || {});
+          break;
+        case 'downloadAttachment':
+          result = await this.downloadAttachment(request.params.arguments || {});
           break;
         default:
           throw new Error(`Unknown tool: ${request.params.name}`);
@@ -1000,6 +1046,131 @@ export class ToolHandler {
    *   inboxId: "123456"
    * })
    */
+  private async listAttachments(args: unknown): Promise<CallToolResult> {
+    const input = ListAttachmentsInputSchema.parse(args);
+
+    const response = await helpScoutClient.get<PaginatedResponse<any>>(
+      `/conversations/${input.conversationId}/threads`,
+      { page: 1, size: TOOL_CONSTANTS.MAX_THREAD_SIZE }
+    );
+
+    const threads = response._embedded?.threads || [];
+    const attachments: Array<{
+      id: number;
+      filename: string;
+      mimeType: string;
+      size: number;
+      threadId: number;
+      threadType: string;
+      createdAt: string;
+    }> = [];
+
+    for (const thread of threads) {
+      const threadAttachments = thread._embedded?.attachments || thread.attachments || [];
+      for (const att of threadAttachments) {
+        attachments.push({
+          id: att.id,
+          filename: att.filename || att.fileName || 'unknown',
+          mimeType: att.mimeType || att.contentType || 'application/octet-stream',
+          size: att.size || 0,
+          threadId: thread.id,
+          threadType: thread.type,
+          createdAt: thread.createdAt,
+        });
+      }
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          conversationId: input.conversationId,
+          totalAttachments: attachments.length,
+          attachments,
+          usage: attachments.length > 0
+            ? 'Use downloadAttachment with the attachment "id" to download a specific file'
+            : 'No attachments found in this conversation',
+        }, null, 2),
+      }],
+    };
+  }
+
+  private async downloadAttachment(args: unknown): Promise<CallToolResult> {
+    const input = DownloadAttachmentInputSchema.parse(args);
+    const savePath = input.savePath || '/tmp/helpscout-attachments/';
+
+    // Get attachment metadata from threads
+    const threadsResponse = await helpScoutClient.get<PaginatedResponse<any>>(
+      `/conversations/${input.conversationId}/threads`,
+      { page: 1, size: TOOL_CONSTANTS.MAX_THREAD_SIZE }
+    );
+
+    const threads = threadsResponse._embedded?.threads || [];
+    let attachmentMeta: { filename: string; mimeType: string; size: number } | null = null;
+
+    for (const thread of threads) {
+      const threadAttachments = thread._embedded?.attachments || thread.attachments || [];
+      for (const att of threadAttachments) {
+        if (String(att.id) === String(input.attachmentId)) {
+          attachmentMeta = {
+            filename: att.filename || att.fileName || `attachment-${input.attachmentId}`,
+            mimeType: att.mimeType || att.contentType || 'application/octet-stream',
+            size: att.size || 0,
+          };
+          break;
+        }
+      }
+      if (attachmentMeta) break;
+    }
+
+    if (!attachmentMeta) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: 'Attachment not found',
+            conversationId: input.conversationId,
+            attachmentId: input.attachmentId,
+            suggestion: 'Use listAttachments first to find valid attachment IDs',
+          }, null, 2),
+        }],
+      };
+    }
+
+    // Download the attachment data (base64 encoded)
+    const attachmentData = await helpScoutClient.getAttachmentData(
+      input.conversationId,
+      input.attachmentId
+    );
+
+    // Decode base64 and write to disk
+    const buffer = Buffer.from(attachmentData.data, 'base64');
+    mkdirSync(savePath, { recursive: true });
+    const filePath = join(savePath, attachmentMeta.filename);
+    writeFileSync(filePath, buffer);
+
+    logger.info('Attachment downloaded successfully', {
+      conversationId: input.conversationId,
+      attachmentId: input.attachmentId,
+      filePath,
+      size: buffer.length,
+    });
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          filePath,
+          filename: attachmentMeta.filename,
+          mimeType: attachmentMeta.mimeType,
+          size: buffer.length,
+          originalSize: attachmentMeta.size,
+        }, null, 2),
+      }],
+    };
+  }
+
   private async comprehensiveConversationSearch(args: unknown): Promise<CallToolResult> {
     const input = MultiStatusConversationSearchInputSchema.parse(args);
     

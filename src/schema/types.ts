@@ -240,6 +240,17 @@ export const CreateDraftConversationInputSchema = z.object({
     .describe('Optional: User ID to assign the conversation to'),
 });
 
+// Attachment Schemas
+export const ListAttachmentsInputSchema = z.object({
+  conversationId: z.string(),
+});
+
+export const DownloadAttachmentInputSchema = z.object({
+  conversationId: z.string(),
+  attachmentId: z.string(),
+  savePath: z.string().optional(),
+});
+
 // Response Types
 export const ServerTimeSchema = z.object({
   isoTime: z.string(),
@@ -268,5 +279,7 @@ export type CreateDraftReplyInput = z.infer<typeof CreateDraftReplyInputSchema>;
 export type CreateNoteInput = z.infer<typeof CreateNoteInputSchema>;
 export type UpdateConversationStatusInput = z.infer<typeof UpdateConversationStatusInputSchema>;
 export type CreateDraftConversationInput = z.infer<typeof CreateDraftConversationInputSchema>;
+export type ListAttachmentsInput = z.infer<typeof ListAttachmentsInputSchema>;
+export type DownloadAttachmentInput = z.infer<typeof DownloadAttachmentInputSchema>;
 export type ServerTime = z.infer<typeof ServerTimeSchema>;
 export type ApiError = z.infer<typeof ErrorSchema>;

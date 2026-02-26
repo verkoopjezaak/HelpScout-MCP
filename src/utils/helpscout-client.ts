@@ -507,6 +507,18 @@ export class HelpScoutClient {
     return response.data;
   }
 
+  async getAttachmentData(conversationId: string, attachmentId: string): Promise<{ data: string }> {
+    const endpoint = `/v2/conversations/${conversationId}/attachments/${attachmentId}/data`;
+
+    logger.info('Downloading attachment data', { conversationId, attachmentId });
+
+    const response = await this.executeWithRetry<{ data: string }>(() =>
+      this.client.get<{ data: string }>(endpoint)
+    );
+
+    return response.data;
+  }
+
   async testConnection(): Promise<boolean> {
     try {
       await this.get('/mailboxes', { page: 1, size: 1 });
