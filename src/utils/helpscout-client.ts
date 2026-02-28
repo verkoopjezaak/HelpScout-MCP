@@ -508,7 +508,7 @@ export class HelpScoutClient {
   }
 
   async getAttachmentData(conversationId: string, attachmentId: string): Promise<{ data: string }> {
-    const endpoint = `/v2/conversations/${conversationId}/attachments/${attachmentId}/data`;
+    const endpoint = `/conversations/${conversationId}/attachments/${attachmentId}/data`;
 
     logger.info('Downloading attachment data', { conversationId, attachmentId });
 
