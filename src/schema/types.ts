@@ -181,6 +181,12 @@ export const CreateDraftReplyInputSchema = z.object({
   status: z.enum(['active', 'pending', 'closed', 'spam'])
     .optional()
     .describe('Status to set on the conversation AFTER the reply is sent. Use "closed" to automatically close the conversation when the draft is sent.'),
+  cc: z.array(z.string().email('Each CC address must be a valid email'))
+    .optional()
+    .describe('Optional: Array of email addresses to CC on the reply.'),
+  bcc: z.array(z.string().email('Each BCC address must be a valid email'))
+    .optional()
+    .describe('Optional: Array of email addresses to BCC on the reply.'),
 });
 
 // Create Note Schema (internal notes not visible to customer)
@@ -238,6 +244,12 @@ export const CreateDraftConversationInputSchema = z.object({
   assignTo: z.number()
     .optional()
     .describe('Optional: User ID to assign the conversation to'),
+  cc: z.array(z.string().email('Each CC address must be a valid email'))
+    .optional()
+    .describe('Optional: Array of email addresses to CC on the outbound draft email.'),
+  bcc: z.array(z.string().email('Each BCC address must be a valid email'))
+    .optional()
+    .describe('Optional: Array of email addresses to BCC on the outbound draft email.'),
 });
 
 // Attachment Schemas

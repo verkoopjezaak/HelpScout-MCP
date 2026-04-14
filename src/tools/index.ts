@@ -400,6 +400,16 @@ export class ToolHandler {
               enum: ['active', 'pending', 'closed', 'spam'],
               description: 'Optional: Status to set on the conversation AFTER the reply is sent. Use "closed" to automatically close the conversation when the draft is sent manually.',
             },
+            cc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional: Array of email addresses to CC on the draft reply.',
+            },
+            bcc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional: Array of email addresses to BCC on the draft reply.',
+            },
           },
           required: ['conversationId', 'text'],
         },
@@ -487,6 +497,16 @@ export class ToolHandler {
             assignTo: {
               type: 'number',
               description: 'Optional: User ID to assign the conversation to',
+            },
+            cc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional: Array of email addresses to CC on the outbound draft email.',
+            },
+            bcc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional: Array of email addresses to BCC on the outbound draft email.',
             },
           },
           required: ['mailboxId', 'subject', 'recipientEmail', 'text'],
@@ -1470,6 +1490,14 @@ export class ToolHandler {
         replyPayload.status = input.status;
       }
 
+      if (input.cc && input.cc.length > 0) {
+        replyPayload.cc = input.cc;
+      }
+
+      if (input.bcc && input.bcc.length > 0) {
+        replyPayload.bcc = input.bcc;
+      }
+
       const response = await helpScoutClient.post<{ id?: number }>(
         `/conversations/${input.conversationId}/reply`,
         replyPayload
@@ -1521,6 +1549,14 @@ export class ToolHandler {
     // Add status if provided - this will be applied when the draft is sent
     if (input.status) {
       replyPayload.status = input.status;
+    }
+
+    if (input.cc && input.cc.length > 0) {
+      replyPayload.cc = input.cc;
+    }
+
+    if (input.bcc && input.bcc.length > 0) {
+      replyPayload.bcc = input.bcc;
     }
 
     // The API returns 201 Created with Resource-ID header, body may be empty
@@ -1737,6 +1773,14 @@ export class ToolHandler {
 
     if (input.user) {
       draftPayload.user = input.user;
+    }
+
+    if (input.cc && input.cc.length > 0) {
+      draftPayload.cc = input.cc;
+    }
+
+    if (input.bcc && input.bcc.length > 0) {
+      draftPayload.bcc = input.bcc;
     }
 
     // Fetch the conversation to get the customer ID
