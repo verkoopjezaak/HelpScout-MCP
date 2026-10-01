@@ -2025,7 +2025,13 @@ export class ToolHandler {
       log({ action: 'update_failed', httpStatus: status });
       return result({ success: false, updated: false, reason: `Help Scout gaf HTTP ${status} in plaats van 204`, draftText: oldText });
     }
-    const after = (await fetchThreads()).threads.find(t => String(t.id) === input.threadId);
+    let after: any;
+    try {
+      after = (await fetchThreads()).threads.find(t => String(t.id) === input.threadId);
+    } catch (err) {
+      log({ action: 'updated_unverified', httpStatus: status, error: String(err) });
+      return result({ success: false, updated: true, verified: false, warning: 'PATCH gaf 204 maar herlezen mislukte; controleer het concept handmatig', conversationId: input.conversationId, threadId: input.threadId, oldText, logPath });
+    }
     const stillDraft = after?.state === 'draft' && !after?.scheduled;
     const textMatches = after?.body === newText;
     const verified = stillDraft && textMatches;

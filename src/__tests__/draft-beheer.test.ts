@@ -215,6 +215,14 @@ test.each([
   expect(logLines().pop().action).toBe('updated_unverified');
 });
 
+test('updateDraft: herlezen na PATCH faalt, dan geen succes maar updated_unverified', async () => {
+  fake.afterPatch = () => { (helpScoutClient.getFresh as jest.Mock).mockRejectedValueOnce(new Error('netwerk weg')); };
+  const r = await upd();
+  expect(r).toMatchObject({ success: false, updated: true, verified: false });
+  expect(r.warning).toMatch(/herlezen mislukte/);
+  expect(logLines().pop().action).toBe('updated_unverified');
+});
+
 test('updateDraft: andere status dan 204/200 telt niet als gelukt', async () => {
   fake.patchStatus = 400;
   const r = await upd();
