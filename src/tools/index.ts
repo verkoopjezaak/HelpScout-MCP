@@ -43,7 +43,10 @@ const TOOL_CONSTANTS = {
     SPAM: 'spam'
   } as const
 } as const;
-import { mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync, appendFileSync } from 'fs';
+import { createHash } from 'crypto';
+import { homedir } from 'os';
+import { dirname } from 'path';
 import { join } from 'path';
 import {
   Inbox,
@@ -513,6 +516,18 @@ export class ToolHandler {
         },
       },
       {
+        name: 'deleteDraft',
+        description: 'Delete an outdated AI draft. Fail-closed: only works when the thread is a draft (state=draft) inside a conversation created by createDraftConversation (only the placeholder customer thread plus draft threads, tag ai-draft). Deletes that whole draft conversation via DELETE /v2/conversations/{id}. A draft reply inside a real customer conversation cannot be deleted through the Help Scout API and is refused (delete it in the browser). Returns the deleted text so the caller can keep it. Every call is logged.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: { type: 'string', description: 'Conversation ID (numeric)' },
+            threadId: { type: 'string', description: 'Thread ID of the draft (numeric)' },
+          },
+          required: ['conversationId', 'threadId'],
+        },
+      },
+      {
         name: 'listAttachments',
         description: 'List all attachments in a conversation. Returns attachment metadata (id, filename, mimeType, size) from all threads. Use this to discover attachments before downloading them.',
         inputSchema: {
@@ -645,6 +660,9 @@ export class ToolHandler {
           break;
         case 'createDraftConversation':
           result = await this.createDraftConversation(request.params.arguments || {});
+          break;
+        case 'deleteDraft':
+          result = await this.deleteDraft(request.params.arguments || {});
           break;
         case 'listAttachments':
           result = await this.listAttachments(request.params.arguments || {});
@@ -1844,6 +1862,44 @@ export class ToolHandler {
       ],
     };
   }
+  private async deleteDraft(args: unknown): Promise<CallToolResult> {
+    const input = z.object({
+      conversationId: z.string().regex(/^\d+$/),
+      threadId: z.string().regex(/^\d+$/),
+    }).parse(args);
+    const logPath = process.env.HELPSCOUT_DELETE_LOG || join(homedir(), '.local/state/helpscout-mcp/delete-draft.jsonl');
+    const sha = (t: string) => createHash('sha256').update(t).digest('hex');
+    const log = (entry: Record<string, unknown>) => {
+      mkdirSync(dirname(logPath), { recursive: true });
+      appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), conversationId: input.conversationId, threadId: input.threadId, ...entry }) + '\n');
+    };
+    const refuse = (reason: string, text?: string): CallToolResult => {
+      log({ action: 'refused', reason, textSha256: text !== undefined ? sha(text) : null });
+      return { content: [{ type: 'text', text: JSON.stringify({ success: false, deleted: false, reason, draftText: text ?? null }, null, 2) }] };
+    };
+
+    const conv = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}`);
+    const page = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}/threads`, { page: 1 });
+    const threads: any[] = page?._embedded?.threads || [];
+    const target = threads.find(t => String(t.id) === input.threadId);
+    if (!target) return refuse('thread niet gevonden in deze conversation');
+    if (target.state !== 'draft') return refuse(`thread is geen draft (state=${target.state}); gepubliceerde threads worden nooit verwijderd`);
+    const draftText: string = target.body ?? target.text ?? '';
+    if ((page?.page?.totalPages ?? 1) > 1) return refuse('conversation heeft meer dan een pagina threads; geen draft-conversation', draftText);
+    const tags: string[] = (conv?.tags || []).map((t: any) => t?.tag ?? t?.name ?? String(t));
+    if (!tags.includes('ai-draft')) return refuse('conversation mist tag ai-draft; concepten van Maarten zelf worden nooit verwijderd', draftText);
+    // Alleen een conversation van createDraftConversation: de placeholder-klantthread plus uitsluitend drafts.
+    const PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
+    const others = threads.filter(t => t.state !== 'draft');
+    const onlyScaffold = others.length === 1 && others[0].type === 'customer' && String(others[0].body ?? '').trim() === PLACEHOLDER;
+    if (!onlyScaffold) return refuse('draft staat in een echte conversation; de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Verwijder deze in de browser.', draftText);
+
+    const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body ?? '' }));
+    const status = await helpScoutClient.delete(`/conversations/${input.conversationId}`);
+    log({ action: 'deleted_draft_conversation', httpStatus: status, subject: conv?.subject ?? null, textSha256: sha(draftText), draftThreads: drafts.map(d => d.threadId) });
+    return { content: [{ type: 'text', text: JSON.stringify({ success: true, deleted: true, method: 'DELETE /v2/conversations/{id}', conversationId: input.conversationId, subject: conv?.subject ?? null, draftText, allDraftThreads: drafts, logPath }, null, 2) }] };
+  }
+
 }
 
 export const toolHandler = new ToolHandler();

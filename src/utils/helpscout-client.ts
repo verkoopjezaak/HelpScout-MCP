@@ -507,6 +507,18 @@ export class HelpScoutClient {
     return response.data;
   }
 
+  /** GET zonder cache, voor controles vlak voor een schrijfactie. */
+  async getFresh<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
+    const response = await this.executeWithRetry<T>(() => this.client.get<T>(endpoint, { params }));
+    return response.data;
+  }
+
+  /** DELETE request; geeft de HTTP-status terug (204 bij succes). */
+  async delete(endpoint: string): Promise<number> {
+    const response = await this.executeWithRetry<unknown>(() => this.client.delete(endpoint));
+    return response.status;
+  }
+
   async getAttachmentData(conversationId: string, attachmentId: string): Promise<{ data: string }> {
     const endpoint = `/conversations/${conversationId}/attachments/${attachmentId}/data`;
 
