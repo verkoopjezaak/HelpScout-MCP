@@ -41,8 +41,9 @@ const sha = (t: string) => createHash('sha256').update(t).digest('hex');
 let dir: string;
 const logPath = () => join(dir, 'log.jsonl');
 const ledgerPath = () => join(dir, 'ledger.jsonl');
+const hashOf = (body: string) => sha(JSON.stringify([body, [], [], [], []]));
 const addLedger = (threadId: number, body: string, conv = '100') =>
-  writeFileSync(ledgerPath(), JSON.stringify({ conversationId: conv, threadId: String(threadId), bodySha256: sha(body) }) + '\n', { flag: 'a' });
+  writeFileSync(ledgerPath(), JSON.stringify({ conversationId: conv, threadId: String(threadId), draftHash: hashOf(body) }) + '\n', { flag: 'a' });
 
 const handler = new ToolHandler();
 const call = async (name: string, args: Record<string, unknown>) => {
@@ -74,7 +75,7 @@ test('verwijdert een ai-draft-conceptconversatie en logt volledige tekst plus re
   const [ahead, done] = logLines();
   expect(ahead.action).toBe('deleting');
   expect(ahead.callerReason).toBe(REASON);
-  expect(ahead.drafts).toEqual([{ threadId: '2', text: 'Oude concepttekst' }]);
+  expect(ahead.drafts).toEqual([{ threadId: '2', text: 'Oude concepttekst', to: null, cc: null, bcc: null }]);
   expect(done.action).toBe('deleted_draft_conversation');
 });
 
@@ -89,6 +90,8 @@ test.each([
   ['draft zonder body', { threads: [scaffold, { id: 2, type: 'reply', state: 'draft', text: 'x' }] }, /body/],
   ['samengevoegde conversation (301 naar ander id)', { conv: { id: 999, tags: [{ tag: 'ai-draft' }] } }, /wijkt af/],
   ['concept door Maarten bewerkt in de UI', { threads: [scaffold, { ...draft, body: 'Maarten herschreef dit' }] }, /bewerkt/],
+  ['cc door Maarten toegevoegd, tekst gelijk', { threads: [scaffold, { ...draft, cc: ['bernd@example.nl'] }] }, /bewerkt/],
+  ['bijlage door Maarten toegevoegd', { threads: [scaffold, { ...draft, _embedded: { attachments: [{ id: 9 }] } }] }, /bewerkt/],
   ['tweede draft door Maarten toegevoegd', { threads: [scaffold, draft, { id: 5, type: 'reply', state: 'draft', body: 'van Maarten' }] }, /bewerkt/],
 ])('weigert: %s', async (_n, patch, re) => {
   Object.assign(fake, patch);
@@ -141,12 +144,25 @@ test('deleteDraft verstuurt nooit iets: geen post, patch of put', async () => {
   expect(fake.put).not.toHaveBeenCalled();
 });
 
-test('createDraftConversation legt de draft vast in het grootboek, daarna is hij te verwijderen', async () => {
+const create = async () => {
   writeFileSync(ledgerPath(), '');
-  fake.post.mockImplementation(async (ep: string) => (ep === '/conversations' ? { id: 100 } : {}));
-  fake.threads = [scaffold, { ...draft, body: '<p>Nieuw concept</p>' }];
+  fake.post.mockImplementation(async (ep: string) => (ep === '/conversations' ? { id: 100 } : { id: 2 }));
   await call('createDraftConversation', { mailboxId: '1', subject: 'Onderwerp', recipientEmail: 'a@b.nl', text: 'Nieuw concept', tags: ['ai-draft'] });
-  expect(readFileSync(ledgerPath(), 'utf8')).toContain(sha('<p>Nieuw concept</p>'));
   fake.post.mockReset();
+};
+
+test('createDraftConversation legt de nieuwe draft vast in het grootboek, daarna is hij te verwijderen', async () => {
+  fake.threads = [scaffold, { ...draft, body: '<p>Nieuw concept</p>' }];
+  await create();
+  expect(readFileSync(ledgerPath(), 'utf8')).toContain(hashOf('<p>Nieuw concept</p>'));
   expect((await del()).deleted).toBe(true);
+});
+
+test('grootboek registreert alleen de draft met het Resource-ID van de reply, niet een andere draft', async () => {
+  fake.threads = [scaffold, draft, { id: 5, type: 'reply', state: 'draft', body: 'van Maarten' }];
+  await create();
+  const ledger = readFileSync(ledgerPath(), 'utf8');
+  expect(ledger).toContain('"threadId":"2"');
+  expect(ledger).not.toContain('"threadId":"5"');
+  expect((await del()).deleted).toBe(false);
 });

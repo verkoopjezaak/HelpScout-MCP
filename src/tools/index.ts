@@ -52,11 +52,18 @@ import { readFileSync, existsSync } from 'fs';
 
 const DRAFT_PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
 const draftLedgerPath = () => process.env.HELPSCOUT_DRAFT_LEDGER || join(homedir(), '.local/state/helpscout-mcp/ai-drafts.jsonl');
-/** Grootboek van door createDraftConversation aangemaakte drafts: conversationId:threadId:sha256(body). */
+/** Hash van alles wat Maarten aan een draft kan wijzigen: tekst, ontvangers, cc, bcc en bijlagen. */
+function draftHash(t: any): string | null {
+  if (typeof t?.body !== 'string') return null;
+  const ids = (xs: any) => (Array.isArray(xs) ? xs.map((x: any) => (typeof x === 'string' ? x : x?.id ?? x?.email ?? JSON.stringify(x))).map(String).sort() : []);
+  const atts = (t?._embedded?.attachments || []).map((a: any) => String(a?.id)).sort();
+  return createHash('sha256').update(JSON.stringify([t.body, ids(t.to), ids(t.cc), ids(t.bcc), atts])).digest('hex');
+}
+/** Grootboek van door createDraftConversation aangemaakte drafts: conversationId:threadId:draftHash. */
 function readDraftLedger(): Set<string> {
   const p = draftLedgerPath();
   if (!existsSync(p)) return new Set();
-  return new Set(readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => { const e = JSON.parse(l); return `${e.conversationId}:${e.threadId}:${e.bodySha256}`; }));
+  return new Set(readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => { const e = JSON.parse(l); return `${e.conversationId}:${e.threadId}:${e.draftHash}`; }));
 }
 import {
   Inbox,
@@ -1832,7 +1839,7 @@ export class ToolHandler {
     }
 
     // Add the draft reply
-    await helpScoutClient.post<{ id?: number }>(
+    const replyResponse = await helpScoutClient.post<{ id?: number }>(
       `/conversations/${conversationId}/reply`,
       draftPayload
     );
@@ -1843,9 +1850,10 @@ export class ToolHandler {
       const page = await helpScoutClient.getFresh<any>(`/conversations/${conversationId}/threads`, { page: 1 });
       const p = draftLedgerPath();
       mkdirSync(dirname(p), { recursive: true });
-      for (const t of (page?._embedded?.threads || []).filter((t: any) => t.state === 'draft' && typeof t.body === 'string')) {
-        appendFileSync(p, JSON.stringify({ ts: new Date().toISOString(), conversationId: String(conversationId), threadId: String(t.id), bodySha256: createHash('sha256').update(t.body).digest('hex') }) + '\n');
-      }
+      // Alleen de zojuist aangemaakte draft (Resource-ID van de reply-POST), nooit een andere draft die er toevallig staat.
+      const created = (page?._embedded?.threads || []).find((t: any) => replyResponse?.id !== undefined && String(t.id) === String(replyResponse.id) && t.state === 'draft');
+      const hash = created ? draftHash(created) : null;
+      if (hash) appendFileSync(p, JSON.stringify({ ts: new Date().toISOString(), conversationId: String(conversationId), threadId: String(created.id), draftHash: hash }) + '\n');
     } catch (ledgerError) {
       logger.warn('Could not record draft ledger entry', { conversationId, error: String(ledgerError) });
     }
@@ -1906,7 +1914,7 @@ export class ToolHandler {
       const page = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}/threads`, { page: 1 });
       return { threads: (page?._embedded?.threads || []) as any[], totalPages: page?.page?.totalPages };
     };
-    const fingerprint = (ts: any[]) => sha(JSON.stringify(ts.map(t => [String(t.id), t.type, t.state, t.body ?? null])));
+    const fingerprint = (ts: any[]) => sha(JSON.stringify(ts.map(t => [String(t.id), t.type, t.state, t.body ?? null, draftHash(t)])));
 
     const conv = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}`);
     // Samengevoegde conversation: axios volgt de 301 naar een andere conversation. Dan weigeren.
@@ -1924,12 +1932,13 @@ export class ToolHandler {
     const others = threads.filter(t => t.state !== 'draft');
     const onlyScaffold = others.length === 1 && others[0].type === 'customer' && String(others[0].body ?? '').trim() === DRAFT_PLACEHOLDER;
     if (!onlyScaffold) return refuse('draft staat in een echte conversation; de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Verwijder deze in de browser.', draftText);
-    const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body }));
+    const draftThreads = threads.filter(t => t.state === 'draft');
+    const drafts = draftThreads.map(t => ({ threadId: String(t.id), text: t.body, to: t.to ?? null, cc: t.cc ?? null, bcc: t.bcc ?? null }));
     // Herkomst: elke draft moet ongewijzigd in het grootboek staan dat createDraftConversation bijhoudt.
     // Bewerkt Maarten het concept in de UI of voegt hij een draft toe, dan klopt de hash niet meer: weigeren.
     const ledger = readDraftLedger();
-    const unknown = drafts.filter(d => typeof d.text !== 'string' || !ledger.has(`${input.conversationId}:${d.threadId}:${sha(d.text)}`));
-    if (unknown.length) return refuse(`draft ${unknown.map(d => d.threadId).join(',')} is bewerkt of niet door een agent aangemaakt (niet in het grootboek); niet verwijderen`, draftText);
+    const unknown = draftThreads.filter(t => { const h = draftHash(t); return !h || !ledger.has(`${input.conversationId}:${t.id}:${h}`); });
+    if (unknown.length) return refuse(`draft ${unknown.map(t => String(t.id)).join(',')} is bewerkt of niet door een agent aangemaakt (niet in het grootboek); niet verwijderen`, draftText);
 
     // Write-ahead: volledige tekst plus reden staat op schijf voordat er iets verdwijnt. Faalt dit, dan gooit appendFileSync en wordt er niets verwijderd.
     log({ action: 'deleting', callerReason: input.reason, subject: conv?.subject ?? null, tags, drafts });
