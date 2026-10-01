@@ -48,6 +48,16 @@ import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { dirname } from 'path';
 import { join } from 'path';
+import { readFileSync, existsSync } from 'fs';
+
+const DRAFT_PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
+const draftLedgerPath = () => process.env.HELPSCOUT_DRAFT_LEDGER || join(homedir(), '.local/state/helpscout-mcp/ai-drafts.jsonl');
+/** Grootboek van door createDraftConversation aangemaakte drafts: conversationId:threadId:sha256(body). */
+function readDraftLedger(): Set<string> {
+  const p = draftLedgerPath();
+  if (!existsSync(p)) return new Set();
+  return new Set(readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => { const e = JSON.parse(l); return `${e.conversationId}:${e.threadId}:${e.bodySha256}`; }));
+}
 import {
   Inbox,
   Conversation,
@@ -1737,7 +1747,7 @@ export class ToolHandler {
     const initialThread: Record<string, unknown> = {
       type: 'customer',
       customer,
-      text: '(Uitgaande e-mail - zie concept hieronder)',
+      text: DRAFT_PLACEHOLDER,
     };
 
     const conversationPayload: Record<string, unknown> = {
@@ -1827,6 +1837,19 @@ export class ToolHandler {
       draftPayload
     );
 
+    // Herkomst vastleggen voor deleteDraft: de drafts zoals Help Scout ze opslaat. Mislukt dit, dan is het concept
+    // later niet via de API te verwijderen (fail-closed), maar het aanmaken zelf slaagt gewoon.
+    try {
+      const page = await helpScoutClient.getFresh<any>(`/conversations/${conversationId}/threads`, { page: 1 });
+      const p = draftLedgerPath();
+      mkdirSync(dirname(p), { recursive: true });
+      for (const t of (page?._embedded?.threads || []).filter((t: any) => t.state === 'draft' && typeof t.body === 'string')) {
+        appendFileSync(p, JSON.stringify({ ts: new Date().toISOString(), conversationId: String(conversationId), threadId: String(t.id), bodySha256: createHash('sha256').update(t.body).digest('hex') }) + '\n');
+      }
+    } catch (ledgerError) {
+      logger.warn('Could not record draft ledger entry', { conversationId, error: String(ledgerError) });
+    }
+
     return {
       content: [
         {
@@ -1879,32 +1902,51 @@ export class ToolHandler {
       log({ action: 'refused', reason, callerReason: input.reason, textSha256: text !== undefined ? sha(text) : null });
       return { content: [{ type: 'text', text: JSON.stringify({ success: false, deleted: false, reason, draftText: text ?? null }, null, 2) }] };
     };
+    const fetchThreads = async () => {
+      const page = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}/threads`, { page: 1 });
+      return { threads: (page?._embedded?.threads || []) as any[], totalPages: page?.page?.totalPages };
+    };
+    const fingerprint = (ts: any[]) => sha(JSON.stringify(ts.map(t => [String(t.id), t.type, t.state, t.body ?? null])));
 
     const conv = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}`);
-    const page = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}/threads`, { page: 1 });
-    const threads: any[] = page?._embedded?.threads || [];
+    // Samengevoegde conversation: axios volgt de 301 naar een andere conversation. Dan weigeren.
+    if (String(conv?.id) !== input.conversationId) return refuse('conversation-id wijkt af (samengevoegd of omgeleid)');
+    const { threads, totalPages } = await fetchThreads();
     const target = threads.find(t => String(t.id) === input.threadId);
     if (!target) return refuse('thread niet gevonden in deze conversation');
     if (target.state !== 'draft') return refuse(`thread is geen draft (state=${target.state}); gepubliceerde threads worden nooit verwijderd`);
-    const draftText: string = target.body ?? target.text ?? '';
-    if ((page?.page?.totalPages ?? 1) > 1) return refuse('conversation heeft meer dan een pagina threads; geen draft-conversation', draftText);
+    if (typeof target.body !== 'string') return refuse('draft heeft geen tekstveld body; ongeldige respons');
+    const draftText: string = target.body;
+    if (totalPages !== 1) return refuse(`paginering niet eenduidig (totalPages=${totalPages}); geen draft-conversation`, draftText);
     const tags: string[] = (conv?.tags || []).map((t: any) => t?.tag ?? t?.name ?? String(t));
     if (!tags.includes('ai-draft')) return refuse('conversation mist tag ai-draft; concepten van Maarten zelf worden nooit verwijderd', draftText);
     // Alleen een conversation van createDraftConversation: de placeholder-klantthread plus uitsluitend drafts.
-    const PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
     const others = threads.filter(t => t.state !== 'draft');
-    const onlyScaffold = others.length === 1 && others[0].type === 'customer' && String(others[0].body ?? '').trim() === PLACEHOLDER;
+    const onlyScaffold = others.length === 1 && others[0].type === 'customer' && String(others[0].body ?? '').trim() === DRAFT_PLACEHOLDER;
     if (!onlyScaffold) return refuse('draft staat in een echte conversation; de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Verwijder deze in de browser.', draftText);
+    const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body }));
+    // Herkomst: elke draft moet ongewijzigd in het grootboek staan dat createDraftConversation bijhoudt.
+    // Bewerkt Maarten het concept in de UI of voegt hij een draft toe, dan klopt de hash niet meer: weigeren.
+    const ledger = readDraftLedger();
+    const unknown = drafts.filter(d => typeof d.text !== 'string' || !ledger.has(`${input.conversationId}:${d.threadId}:${sha(d.text)}`));
+    if (unknown.length) return refuse(`draft ${unknown.map(d => d.threadId).join(',')} is bewerkt of niet door een agent aangemaakt (niet in het grootboek); niet verwijderen`, draftText);
 
-    const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body ?? '' }));
     // Write-ahead: volledige tekst plus reden staat op schijf voordat er iets verdwijnt. Faalt dit, dan gooit appendFileSync en wordt er niets verwijderd.
     log({ action: 'deleting', callerReason: input.reason, subject: conv?.subject ?? null, tags, drafts });
+    // Vlak voor de DELETE opnieuw lezen: is er intussen iets veranderd (gepubliceerd, bewerkt, klantreactie), dan stoppen.
+    // ponytail: restvenster van milliseconden tussen herlezen en DELETE; de API kent geen voorwaardelijke DELETE.
+    const again = await fetchThreads();
+    if (again.totalPages !== 1 || fingerprint(again.threads) !== fingerprint(threads)) return refuse('conversation is veranderd tussen controle en verwijderen; niets verwijderd', draftText);
     let status: number;
     try {
       status = await helpScoutClient.delete(`/conversations/${input.conversationId}`);
     } catch (err) {
       log({ action: 'delete_failed', error: String(err) });
       throw err;
+    }
+    if (status !== 204) {
+      log({ action: 'delete_failed', httpStatus: status });
+      return { content: [{ type: 'text', text: JSON.stringify({ success: false, deleted: false, reason: `Help Scout gaf HTTP ${status} in plaats van 204`, draftText }, null, 2) }] };
     }
     log({ action: 'deleted_draft_conversation', httpStatus: status, subject: conv?.subject ?? null, textSha256: sha(draftText), draftThreads: drafts.map(d => d.threadId) });
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, deleted: true, method: 'DELETE /v2/conversations/{id}', conversationId: input.conversationId, subject: conv?.subject ?? null, draftText, allDraftThreads: drafts, logPath }, null, 2) }] };
