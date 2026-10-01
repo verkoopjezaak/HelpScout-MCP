@@ -517,14 +517,15 @@ export class ToolHandler {
       },
       {
         name: 'deleteDraft',
-        description: 'Delete an outdated AI draft. Fail-closed: only works when the thread is a draft (state=draft) inside a conversation created by createDraftConversation (only the placeholder customer thread plus draft threads, tag ai-draft). Deletes that whole draft conversation via DELETE /v2/conversations/{id}. A draft reply inside a real customer conversation cannot be deleted through the Help Scout API and is refused (delete it in the browser). Returns the deleted text so the caller can keep it. Every call is logged.',
+        description: 'Delete an outdated AI draft. Fail-closed: only works when the thread is a draft (state=draft) inside a conversation created by createDraftConversation (only the placeholder customer thread plus draft threads, tag ai-draft). Deletes that whole draft conversation via DELETE /v2/conversations/{id}. A draft reply inside a real customer conversation cannot be deleted through the Help Scout API and is refused (delete it in the browser). Before deleting, the full draft text, conversation id and reason are written to a local log; if that write fails nothing is deleted. Never sends anything. Returns the deleted text so the caller can keep it.',
         inputSchema: {
           type: 'object',
           properties: {
             conversationId: { type: 'string', description: 'Conversation ID (numeric)' },
             threadId: { type: 'string', description: 'Thread ID of the draft (numeric)' },
+            reason: { type: 'string', description: 'Why this draft is outdated (min 10 chars), e.g. "vervangen door nieuw concept 3468..." ; written to the log' },
           },
-          required: ['conversationId', 'threadId'],
+          required: ['conversationId', 'threadId', 'reason'],
         },
       },
       {
@@ -1866,6 +1867,7 @@ export class ToolHandler {
     const input = z.object({
       conversationId: z.string().regex(/^\d+$/),
       threadId: z.string().regex(/^\d+$/),
+      reason: z.string().trim().min(10),
     }).parse(args);
     const logPath = process.env.HELPSCOUT_DELETE_LOG || join(homedir(), '.local/state/helpscout-mcp/delete-draft.jsonl');
     const sha = (t: string) => createHash('sha256').update(t).digest('hex');
@@ -1874,7 +1876,7 @@ export class ToolHandler {
       appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), conversationId: input.conversationId, threadId: input.threadId, ...entry }) + '\n');
     };
     const refuse = (reason: string, text?: string): CallToolResult => {
-      log({ action: 'refused', reason, textSha256: text !== undefined ? sha(text) : null });
+      log({ action: 'refused', reason, callerReason: input.reason, textSha256: text !== undefined ? sha(text) : null });
       return { content: [{ type: 'text', text: JSON.stringify({ success: false, deleted: false, reason, draftText: text ?? null }, null, 2) }] };
     };
 
@@ -1895,7 +1897,15 @@ export class ToolHandler {
     if (!onlyScaffold) return refuse('draft staat in een echte conversation; de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Verwijder deze in de browser.', draftText);
 
     const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body ?? '' }));
-    const status = await helpScoutClient.delete(`/conversations/${input.conversationId}`);
+    // Write-ahead: volledige tekst plus reden staat op schijf voordat er iets verdwijnt. Faalt dit, dan gooit appendFileSync en wordt er niets verwijderd.
+    log({ action: 'deleting', callerReason: input.reason, subject: conv?.subject ?? null, tags, drafts });
+    let status: number;
+    try {
+      status = await helpScoutClient.delete(`/conversations/${input.conversationId}`);
+    } catch (err) {
+      log({ action: 'delete_failed', error: String(err) });
+      throw err;
+    }
     log({ action: 'deleted_draft_conversation', httpStatus: status, subject: conv?.subject ?? null, textSha256: sha(draftText), draftThreads: drafts.map(d => d.threadId) });
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, deleted: true, method: 'DELETE /v2/conversations/{id}', conversationId: input.conversationId, subject: conv?.subject ?? null, draftText, allDraftThreads: drafts, logPath }, null, 2) }] };
   }
