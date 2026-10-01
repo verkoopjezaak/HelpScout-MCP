@@ -83,6 +83,7 @@ export const ThreadSchema = z.object({
 export const SearchInboxesInputSchema = z.object({
   query: z.string(),
   limit: z.number().min(1).max(100).default(50),
+  page: z.number().int().min(1).optional(),
   cursor: z.string().optional(),
 });
 
@@ -94,6 +95,7 @@ export const SearchConversationsInputSchema = z.object({
   createdAfter: z.string().optional(),
   createdBefore: z.string().optional(),
   limit: z.number().min(1).max(100).default(50),
+  page: z.number().int().min(1).optional(),
   cursor: z.string().optional(),
   sort: z.enum(['createdAt', 'updatedAt', 'number']).default('createdAt'),
   order: z.enum(['asc', 'desc']).default('desc'),
@@ -103,6 +105,7 @@ export const SearchConversationsInputSchema = z.object({
 export const GetThreadsInputSchema = z.object({
   conversationId: z.string(),
   limit: z.number().min(1).max(200).default(200),
+  page: z.number().int().min(1).optional(),
   cursor: z.string().optional(),
 });
 
@@ -121,6 +124,7 @@ export const AdvancedConversationSearchInputSchema = z.object({
   createdAfter: z.string().optional(),
   createdBefore: z.string().optional(),
   limit: z.number().min(1).max(100).default(50),
+  page: z.number().int().min(1).optional(),
 });
 
 export const MultiStatusConversationSearchInputSchema = z.object({

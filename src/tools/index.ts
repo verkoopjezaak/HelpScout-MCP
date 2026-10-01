@@ -48,10 +48,9 @@ import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { dirname } from 'path';
 import { join } from 'path';
-import { readFileSync, existsSync } from 'fs';
 
 const DRAFT_PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
-const draftLedgerPath = () => process.env.HELPSCOUT_DRAFT_LEDGER || join(homedir(), '.local/state/helpscout-mcp/ai-drafts.jsonl');
+const draftLogPath = () => process.env.HELPSCOUT_DELETE_LOG || join(homedir(), '.local/state/helpscout-mcp/delete-draft.jsonl');
 /** Hash van alles wat Maarten aan een draft kan wijzigen: tekst, ontvangers, cc, bcc en bijlagen. */
 function draftHash(t: any): string | null {
   if (typeof t?.body !== 'string') return null;
@@ -59,11 +58,16 @@ function draftHash(t: any): string | null {
   const atts = (t?._embedded?.attachments || []).map((a: any) => String(a?.id)).sort();
   return createHash('sha256').update(JSON.stringify([t.body, ids(t.to), ids(t.cc), ids(t.bcc), atts])).digest('hex');
 }
-/** Grootboek van door createDraftConversation aangemaakte drafts: conversationId:threadId:draftHash. */
-function readDraftLedger(): Set<string> {
-  const p = draftLedgerPath();
-  if (!existsSync(p)) return new Set();
-  return new Set(readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => { const e = JSON.parse(l); return `${e.conversationId}:${e.threadId}:${e.draftHash}`; }));
+/** Paginanummer uit expliciete page, of uit een eerder teruggegeven nextCursor (href met ?page=N). */
+function pageOf(input: { page?: number; cursor?: string }): number {
+  if (input.page) return input.page;
+  const m = /[?&]page=(\d+)/.exec(input.cursor ?? '');
+  return m ? Number(m[1]) : 1;
+}
+/** Afgekapte lijst nooit stil: heeftMeer plus volgendePagina uit de paginering van Help Scout. */
+function moreInfo(page: any, links: any, current: number) {
+  const heeftMeer = typeof page?.totalPages === 'number' ? current < page.totalPages : Boolean(links?.next);
+  return { heeftMeer, volgendePagina: heeftMeer ? current + 1 : null };
 }
 import {
   Inbox,
@@ -121,7 +125,12 @@ export class ToolHandler {
             },
             cursor: {
               type: 'string',
-              description: 'Pagination cursor for next page',
+              description: 'Pagination cursor for next page (the nextCursor of a previous result)',
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (default 1). Check heeftMeer/volgendePagina in the result: if heeftMeer is true the list is truncated, fetch the next page.',
+              minimum: 1,
             },
           },
           required: ['query'],
@@ -169,7 +178,12 @@ export class ToolHandler {
             },
             cursor: {
               type: 'string',
-              description: 'Pagination cursor for next page',
+              description: 'Pagination cursor for next page (the nextCursor of a previous result)',
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (default 1). Check heeftMeer/volgendePagina in the result: if heeftMeer is true the list is truncated, fetch the next page.',
+              minimum: 1,
             },
             sort: {
               type: 'string',
@@ -224,7 +238,12 @@ export class ToolHandler {
             },
             cursor: {
               type: 'string',
-              description: 'Pagination cursor for next page',
+              description: 'Pagination cursor for next page (the nextCursor of a previous result)',
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (default 1). Check heeftMeer/volgendePagina in the result: if heeftMeer is true the list is truncated, fetch the next page.',
+              minimum: 1,
             },
           },
           required: ['conversationId'],
@@ -308,6 +327,11 @@ export class ToolHandler {
               minimum: 1,
               maximum: TOOL_CONSTANTS.MAX_PAGE_SIZE,
               default: TOOL_CONSTANTS.DEFAULT_PAGE_SIZE,
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (default 1). If heeftMeer is true in the result, fetch volgendePagina.',
+              minimum: 1,
             },
           },
         },
@@ -534,7 +558,7 @@ export class ToolHandler {
       },
       {
         name: 'deleteDraft',
-        description: 'Delete an outdated AI draft. Fail-closed: only works when the thread is a draft (state=draft) inside a conversation created by createDraftConversation (only the placeholder customer thread plus draft threads, tag ai-draft). Deletes that whole draft conversation via DELETE /v2/conversations/{id}. A draft reply inside a real customer conversation cannot be deleted through the Help Scout API and is refused (delete it in the browser). Before deleting, the full draft text, conversation id and reason are written to a local log; if that write fails nothing is deleted. Never sends anything. Returns the deleted text so the caller can keep it.',
+        description: 'Delete an outdated draft, whoever wrote it (agent or Maarten). Works only on a concept conversation: a conversation that holds nothing but draft threads, optionally the placeholder customer thread of createDraftConversation and system line items. Deletes that whole concept conversation via DELETE /v2/conversations/{id}. Refused for anything with a sent message, a customer message or a note: a draft reply inside a real customer conversation cannot be deleted through the Help Scout API (DELETE thread gives 400); use updateDraft to correct its text, or delete it in the browser. Before deleting, the full draft text, conversation id and reason are written to a local log; if that write fails nothing is deleted. Never sends anything. Returns the deleted text so the caller can keep it.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -543,6 +567,20 @@ export class ToolHandler {
             reason: { type: 'string', description: 'Why this draft is outdated (min 10 chars), e.g. "vervangen door nieuw concept 3468..." ; written to the log' },
           },
           required: ['conversationId', 'threadId', 'reason'],
+        },
+      },
+      {
+        name: 'updateDraft',
+        description: 'Replace the text of an existing draft (state=draft), whoever wrote it, in any conversation, also a draft reply inside a real customer conversation. Uses PATCH /v2/conversations/{id}/threads/{threadId} op replace /text; the thread stays a draft and is never sent. Recipients, cc, bcc and attachments are not changed. Before the change the full old text, the new text and the reason are written to a local log; if that write fails nothing is changed. Refused for any thread that is not a draft. Returns the old text so the caller can keep it.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            conversationId: { type: 'string', description: 'Conversation ID (numeric)' },
+            threadId: { type: 'string', description: 'Thread ID of the draft (numeric)' },
+            text: { type: 'string', description: 'The complete new draft text (HTML allowed), replaces the old text entirely' },
+            reason: { type: 'string', description: 'Why the draft is changed (min 10 chars); written to the log' },
+          },
+          required: ['conversationId', 'threadId', 'text', 'reason'],
         },
       },
       {
@@ -682,6 +720,9 @@ export class ToolHandler {
         case 'deleteDraft':
           result = await this.deleteDraft(request.params.arguments || {});
           break;
+        case 'updateDraft':
+          result = await this.updateDraft(request.params.arguments || {});
+          break;
         case 'listAttachments':
           result = await this.listAttachments(request.params.arguments || {});
           break;
@@ -737,7 +778,7 @@ export class ToolHandler {
     // Using direct import
     
     const response = await helpScoutClient.get<PaginatedResponse<Inbox>>('/mailboxes', {
-      page: 1,
+      page: pageOf(input),
       size: input.limit,
     });
 
@@ -761,6 +802,7 @@ export class ToolHandler {
             query: input.query,
             totalFound: filteredInboxes.length,
             totalAvailable: inboxes.length,
+            ...moreInfo(response.page, response._links, pageOf(input)),
             usage: filteredInboxes.length > 0 ? 
               'NEXT STEP: Use the "id" field from these results in your conversation search tools (comprehensiveConversationSearch or searchConversations)' : 
               'No inboxes matched your query. Try a different search term or use empty string "" to list all inboxes.',
@@ -778,7 +820,7 @@ export class ToolHandler {
     // Using direct imports
     
     const queryParams: Record<string, unknown> = {
-      page: 1,
+      page: pageOf(input),
       size: input.limit,
       sortField: input.sort,
       sortOrder: input.order,
@@ -832,6 +874,7 @@ export class ToolHandler {
       results: conversations,
       pagination: response.page,
       nextCursor: response._links?.next?.href,
+      ...moreInfo(response.page, response._links, pageOf(input)),
       searchInfo: {
         query: input.query,
         status: queryParams.status || 'all',
@@ -923,7 +966,7 @@ export class ToolHandler {
     const response = await helpScoutClient.get<PaginatedResponse<Thread>>(
       `/conversations/${input.conversationId}/threads`,
       {
-        page: 1,
+        page: pageOf(input),
         size: input.limit,
       }
     );
@@ -945,6 +988,7 @@ export class ToolHandler {
             threads: processedThreads,
             pagination: response.page,
             nextCursor: response._links?.next?.href,
+            ...moreInfo(response.page, response._links, pageOf(input)),
           }, null, 2),
         },
       ],
@@ -1045,7 +1089,7 @@ export class ToolHandler {
 
     // Set up query parameters
     const queryParams: Record<string, unknown> = {
-      page: 1,
+      page: input.page ?? 1,
       size: input.limit || 50,
       sortField: 'createdAt',
       sortOrder: 'desc',
@@ -1085,6 +1129,7 @@ export class ToolHandler {
             },
             pagination: response.page,
             nextCursor: response._links?.next?.href,
+            ...moreInfo(response.page, response._links, input.page ?? 1),
           }, null, 2),
         },
       ],
@@ -1839,24 +1884,10 @@ export class ToolHandler {
     }
 
     // Add the draft reply
-    const replyResponse = await helpScoutClient.post<{ id?: number }>(
+    await helpScoutClient.post<{ id?: number }>(
       `/conversations/${conversationId}/reply`,
       draftPayload
     );
-
-    // Herkomst vastleggen voor deleteDraft: de drafts zoals Help Scout ze opslaat. Mislukt dit, dan is het concept
-    // later niet via de API te verwijderen (fail-closed), maar het aanmaken zelf slaagt gewoon.
-    try {
-      const page = await helpScoutClient.getFresh<any>(`/conversations/${conversationId}/threads`, { page: 1 });
-      const p = draftLedgerPath();
-      mkdirSync(dirname(p), { recursive: true });
-      // Alleen de zojuist aangemaakte draft (Resource-ID van de reply-POST), nooit een andere draft die er toevallig staat.
-      const created = (page?._embedded?.threads || []).find((t: any) => replyResponse?.id !== undefined && String(t.id) === String(replyResponse.id) && t.state === 'draft');
-      const hash = created ? draftHash(created) : null;
-      if (hash) appendFileSync(p, JSON.stringify({ ts: new Date().toISOString(), conversationId: String(conversationId), threadId: String(created.id), draftHash: hash }) + '\n');
-    } catch (ledgerError) {
-      logger.warn('Could not record draft ledger entry', { conversationId, error: String(ledgerError) });
-    }
 
     return {
       content: [
@@ -1894,55 +1925,59 @@ export class ToolHandler {
       ],
     };
   }
-  private async deleteDraft(args: unknown): Promise<CallToolResult> {
+  /** Gemeenschappelijk voor deleteDraft en updateDraft: invoer, write-ahead log, weigeren, verse conversation plus threads. */
+  private async loadDraft(args: unknown, extra: Record<string, z.ZodTypeAny> = {}) {
     const input = z.object({
       conversationId: z.string().regex(/^\d+$/),
       threadId: z.string().regex(/^\d+$/),
       reason: z.string().trim().min(10),
-    }).parse(args);
-    const logPath = process.env.HELPSCOUT_DELETE_LOG || join(homedir(), '.local/state/helpscout-mcp/delete-draft.jsonl');
+      ...extra,
+    }).parse(args) as { conversationId: string; threadId: string; reason: string; text?: string };
+    const logPath = draftLogPath();
     const sha = (t: string) => createHash('sha256').update(t).digest('hex');
+    // Faalt het schrijven, dan gooit appendFileSync en gebeurt er daarna niets meer (fail-closed).
     const log = (entry: Record<string, unknown>) => {
       mkdirSync(dirname(logPath), { recursive: true });
       appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), conversationId: input.conversationId, threadId: input.threadId, ...entry }) + '\n');
     };
+    const result = (body: Record<string, unknown>): CallToolResult => ({ content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] });
     const refuse = (reason: string, text?: string): CallToolResult => {
       log({ action: 'refused', reason, callerReason: input.reason, textSha256: text !== undefined ? sha(text) : null });
-      return { content: [{ type: 'text', text: JSON.stringify({ success: false, deleted: false, reason, draftText: text ?? null }, null, 2) }] };
+      return result({ success: false, deleted: false, updated: false, reason, draftText: text ?? null });
     };
     const fetchThreads = async () => {
       const page = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}/threads`, { page: 1 });
       return { threads: (page?._embedded?.threads || []) as any[], totalPages: page?.page?.totalPages };
     };
     const fingerprint = (ts: any[]) => sha(JSON.stringify(ts.map(t => [String(t.id), t.type, t.state, t.body ?? null, draftHash(t)])));
-
     const conv = await helpScoutClient.getFresh<any>(`/conversations/${input.conversationId}`);
-    // Samengevoegde conversation: axios volgt de 301 naar een andere conversation. Dan weigeren.
-    if (String(conv?.id) !== input.conversationId) return refuse('conversation-id wijkt af (samengevoegd of omgeleid)');
     const { threads, totalPages } = await fetchThreads();
     const target = threads.find(t => String(t.id) === input.threadId);
-    if (!target) return refuse('thread niet gevonden in deze conversation');
-    if (target.state !== 'draft') return refuse(`thread is geen draft (state=${target.state}); gepubliceerde threads worden nooit verwijderd`);
-    if (typeof target.body !== 'string') return refuse('draft heeft geen tekstveld body; ongeldige respons');
-    const draftText: string = target.body;
-    if (totalPages !== 1) return refuse(`paginering niet eenduidig (totalPages=${totalPages}); geen draft-conversation`, draftText);
-    const tags: string[] = (conv?.tags || []).map((t: any) => t?.tag ?? t?.name ?? String(t));
-    if (!tags.includes('ai-draft')) return refuse('conversation mist tag ai-draft; concepten van Maarten zelf worden nooit verwijderd', draftText);
-    // Alleen een conversation van createDraftConversation: de placeholder-klantthread plus uitsluitend drafts.
-    const others = threads.filter(t => t.state !== 'draft');
-    const onlyScaffold = others.length === 1 && others[0].type === 'customer' && String(others[0].body ?? '').trim() === DRAFT_PLACEHOLDER;
-    if (!onlyScaffold) return refuse('draft staat in een echte conversation; de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Verwijder deze in de browser.', draftText);
-    const draftThreads = threads.filter(t => t.state === 'draft');
-    const drafts = draftThreads.map(t => ({ threadId: String(t.id), text: t.body, to: t.to ?? null, cc: t.cc ?? null, bcc: t.bcc ?? null }));
-    // Herkomst: elke draft moet ongewijzigd in het grootboek staan dat createDraftConversation bijhoudt.
-    // Bewerkt Maarten het concept in de UI of voegt hij een draft toe, dan klopt de hash niet meer: weigeren.
-    const ledger = readDraftLedger();
-    const unknown = draftThreads.filter(t => { const h = draftHash(t); return !h || !ledger.has(`${input.conversationId}:${t.id}:${h}`); });
-    if (unknown.length) return refuse(`draft ${unknown.map(t => String(t.id)).join(',')} is bewerkt of niet door een agent aangemaakt (niet in het grootboek); niet verwijderen`, draftText);
+    // Samengevoegde conversation: axios volgt de 301 naar een andere conversation. Dan weigeren.
+    const problem = String(conv?.id) !== input.conversationId ? 'conversation-id wijkt af (samengevoegd of omgeleid)'
+      : !target ? (totalPages > 1 ? 'thread niet gevonden op pagina 1 van deze conversation' : 'thread niet gevonden in deze conversation')
+      : target.state !== 'draft' ? `thread is geen draft (state=${target.state}); verstuurde of gepubliceerde berichten worden nooit gewijzigd of verwijderd`
+      : typeof target.body !== 'string' ? 'draft heeft geen tekstveld body; ongeldige respons'
+      : null;
+    return { input, log, refuse, result, sha, fetchThreads, fingerprint, conv, threads, totalPages, target, problem, logPath };
+  }
 
-    // Write-ahead: volledige tekst plus reden staat op schijf voordat er iets verdwijnt. Faalt dit, dan gooit appendFileSync en wordt er niets verwijderd.
+  private async deleteDraft(args: unknown): Promise<CallToolResult> {
+    const { input, log, refuse, result, sha, fetchThreads, fingerprint, conv, threads, totalPages, target, problem, logPath } = await this.loadDraft(args);
+    if (problem) return refuse(problem);
+    const draftText: string = target.body;
+    if (totalPages !== 1) return refuse(`paginering niet eenduidig (totalPages=${totalPages}); geen conceptconversatie`, draftText);
+    // Harde grens: alleen een conceptconversatie. Naast drafts mag er hooguit de placeholder van createDraftConversation
+    // en systeemregels (lineitem) staan; elk verstuurd bericht, elke klantmail en elke notitie betekent weigeren.
+    const others = threads.filter(t => t.state !== 'draft' && t.type !== 'lineitem');
+    const conceptOnly = others.length <= 1 && others.every(t => t.type === 'customer' && String(t.body ?? '').trim() === DRAFT_PLACEHOLDER);
+    if (!conceptOnly) return refuse('draft staat in een echte conversation (verstuurd bericht, klantbericht of notitie); de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Corrigeer de tekst met updateDraft of verwijder het concept in de browser.', draftText);
+    const tags: string[] = (conv?.tags || []).map((t: any) => t?.tag ?? t?.name ?? String(t));
+    const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body ?? null, to: t.to ?? null, cc: t.cc ?? null, bcc: t.bcc ?? null }));
+
+    // Write-ahead: volledige tekst plus reden staat op schijf voordat er iets verdwijnt.
     log({ action: 'deleting', callerReason: input.reason, subject: conv?.subject ?? null, tags, drafts });
-    // Vlak voor de DELETE opnieuw lezen: is er intussen iets veranderd (gepubliceerd, bewerkt, klantreactie), dan stoppen.
+    // Vlak voor de DELETE opnieuw lezen: is er intussen iets veranderd (verstuurd, bewerkt, klantreactie), dan stoppen.
     // ponytail: restvenster van milliseconden tussen herlezen en DELETE; de API kent geen voorwaardelijke DELETE.
     const again = await fetchThreads();
     if (again.totalPages !== 1 || fingerprint(again.threads) !== fingerprint(threads)) return refuse('conversation is veranderd tussen controle en verwijderen; niets verwijderd', draftText);
@@ -1953,12 +1988,39 @@ export class ToolHandler {
       log({ action: 'delete_failed', error: String(err) });
       throw err;
     }
-    if (status !== 204) {
+    if (status !== 204 && status !== 200) {
       log({ action: 'delete_failed', httpStatus: status });
-      return { content: [{ type: 'text', text: JSON.stringify({ success: false, deleted: false, reason: `Help Scout gaf HTTP ${status} in plaats van 204`, draftText }, null, 2) }] };
+      return result({ success: false, deleted: false, reason: `Help Scout gaf HTTP ${status} in plaats van 204`, draftText });
     }
     log({ action: 'deleted_draft_conversation', httpStatus: status, subject: conv?.subject ?? null, textSha256: sha(draftText), draftThreads: drafts.map(d => d.threadId) });
-    return { content: [{ type: 'text', text: JSON.stringify({ success: true, deleted: true, method: 'DELETE /v2/conversations/{id}', conversationId: input.conversationId, subject: conv?.subject ?? null, draftText, allDraftThreads: drafts, logPath }, null, 2) }] };
+    return result({ success: true, deleted: true, method: 'DELETE /v2/conversations/{id}', conversationId: input.conversationId, subject: conv?.subject ?? null, draftText, allDraftThreads: drafts, logPath });
+  }
+
+  private async updateDraft(args: unknown): Promise<CallToolResult> {
+    const { input, log, refuse, result, fetchThreads, conv, target, problem, logPath } = await this.loadDraft(args, { text: z.string().min(1) });
+    if (problem) return refuse(problem);
+    const oldText: string = target.body;
+    const newText = input.text as string;
+    // Write-ahead: oude en nieuwe tekst plus reden op schijf voordat er iets verandert.
+    log({ action: 'updating', callerReason: input.reason, subject: conv?.subject ?? null, oldText, newText, to: target.to ?? null, cc: target.cc ?? null, bcc: target.bcc ?? null });
+    // Vlak voor de PATCH opnieuw lezen: verstuurd of intussen bewerkt betekent stoppen.
+    const before = (await fetchThreads()).threads.find(t => String(t.id) === input.threadId);
+    if (!before || before.state !== 'draft' || draftHash(before) !== draftHash(target)) return refuse('draft is veranderd of verstuurd tussen controle en wijzigen; niets gewijzigd', oldText);
+    let status: number;
+    try {
+      status = await helpScoutClient.patchStatus(`/conversations/${input.conversationId}/threads/${input.threadId}`, { op: 'replace', path: '/text', value: newText });
+    } catch (err) {
+      log({ action: 'update_failed', error: String(err) });
+      throw err;
+    }
+    if (status !== 204 && status !== 200) {
+      log({ action: 'update_failed', httpStatus: status });
+      return result({ success: false, updated: false, reason: `Help Scout gaf HTTP ${status} in plaats van 204`, draftText: oldText });
+    }
+    const after = (await fetchThreads()).threads.find(t => String(t.id) === input.threadId);
+    const stillDraft = after?.state === 'draft';
+    log({ action: 'updated_draft', httpStatus: status, stillDraft, textMatches: after?.body === newText });
+    return result({ success: true, updated: true, method: 'PATCH /v2/conversations/{id}/threads/{threadId} /text', conversationId: input.conversationId, threadId: input.threadId, stillDraft, oldText, newText: after?.body ?? null, logPath });
   }
 
 }
