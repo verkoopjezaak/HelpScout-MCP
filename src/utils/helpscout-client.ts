@@ -515,13 +515,15 @@ export class HelpScoutClient {
 
   /** PATCH die de HTTP-status teruggeeft (204 bij succes), voor schrijfacties die alleen op 204/200 mogen slagen. */
   async patchStatus(endpoint: string, data: unknown): Promise<number> {
-    const response = await this.executeWithRetry<unknown>(() => this.client.patch(endpoint, data));
+    // Geen automatische herhaling: een retry zou na de controles van de aanroeper opnieuw schrijven.
+    const response = await this.executeWithRetry<unknown>(() => this.client.patch(endpoint, data), { ...this.defaultRetryConfig, retries: 0 });
     return response.status;
   }
 
   /** DELETE request; geeft de HTTP-status terug (204 bij succes). */
   async delete(endpoint: string): Promise<number> {
-    const response = await this.executeWithRetry<unknown>(() => this.client.delete(endpoint));
+    // Geen automatische herhaling: een retry zou na de controles van de aanroeper opnieuw verwijderen.
+    const response = await this.executeWithRetry<unknown>(() => this.client.delete(endpoint), { ...this.defaultRetryConfig, retries: 0 });
     return response.status;
   }
 

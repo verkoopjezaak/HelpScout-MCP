@@ -34,9 +34,9 @@ import { ToolHandler } from '../tools/index.js';
 import { helpScoutClient } from '../utils/helpscout-client.js';
 
 const PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
-const scaffold = { id: 1, type: 'customer', state: 'published', body: PLACEHOLDER };
+const scaffold = { id: 1, type: 'customer', state: 'published', body: PLACEHOLDER, source: { type: 'api', via: 'customer' } };
 const draft = { id: 2, type: 'reply', state: 'draft', body: 'Oude concepttekst' };
-const customerMail = { id: 1, type: 'customer', state: 'published', body: 'Hallo, ik wil mijn bedrijf verkopen' };
+const customerMail = { id: 1, type: 'customer', state: 'published', body: 'Hallo, ik wil mijn bedrijf verkopen', source: { type: 'email', via: 'customer' } };
 const REASON = 'vervangen door nieuw concept met actuele datum';
 
 let dir: string;
@@ -105,6 +105,11 @@ test.each([
   ['verstuurde reply naast de draft', { threads: [scaffold, { id: 3, type: 'reply', state: 'published', body: 'x' }, draft] }, /echte conversation/],
   ['notitie in de conversation', { threads: [scaffold, { id: 3, type: 'note', state: 'published', body: 'intern' }, draft] }, /echte conversation/],
   ['twee placeholders', { threads: [scaffold, { ...scaffold, id: 9 }, draft] }, /echte conversation/],
+  ['klantmail met toevallig de placeholdertekst', { threads: [{ ...scaffold, source: { type: 'email', via: 'customer' } }, draft] }, /echte conversation/],
+  ['placeholder zonder source', { threads: [{ ...scaffold, source: undefined }, draft] }, /echte conversation/],
+  ['ingeplande draft', { threads: [scaffold, { ...draft, scheduled: { scheduledFor: '2026-10-02T08:00:00Z' } }] }, /ingepland/],
+  ['andere draft ingepland', { threads: [scaffold, draft, { id: 5, type: 'reply', state: 'draft', body: 'x', scheduled: { scheduledFor: 'x' } }] }, /ingepland/],
+  ['andere draft zonder body', { threads: [scaffold, draft, { id: 5, type: 'reply', state: 'draft' }] }, /andere draft/],
   ['meerdere pagina threads', { totalPages: 2 }, /paginering/],
   ['paginering ontbreekt', { totalPages: undefined }, /paginering/],
   ['thread bestaat niet', { threads: [scaffold] }, /niet gevonden/],
@@ -174,6 +179,7 @@ test.each([
   ['klantbericht', { threads: [customerMail, draft] , }, null],
   ['thread bestaat niet', { threads: [customerMail] }, /niet gevonden/],
   ['samengevoegde conversation', { conv: { id: 999 } }, /wijkt af/],
+  ['ingeplande draft', { threads: [customerMail, { ...draft, scheduled: { scheduledFor: 'x' } }] }, /ingepland/],
 ])('updateDraft grens: %s', async (_n, patch, re) => {
   Object.assign(fake, patch);
   const r = await upd(_n === 'klantbericht' ? { threadId: '1' } : {});
@@ -194,6 +200,19 @@ test('updateDraft: niets gewijzigd als het log niet geschreven kan worden', asyn
   blockLog();
   expect((await upd()).updated).not.toBe(true);
   expect(helpScoutClient.patchStatus).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['thread is na PATCH verstuurd', () => { fake.threads = [customerMail, { ...draft, state: 'published', body: 'Nieuwe tekst' }]; }, /geen draft meer/],
+  ['tekst wijkt af na herlezen', () => { fake.threads = [customerMail, { ...draft, body: '<p>iets anders</p>' }]; }, /wijkt af/],
+])('updateDraft meldt geen succes als de postcontrole faalt: %s', async (_n, after, re) => {
+  fake.threads = [customerMail, draft];
+  fake.afterPatch = after;
+  const r = await upd();
+  expect(r.success).toBe(false);
+  expect(r.verified).toBe(false);
+  expect(r.warning).toMatch(re);
+  expect(logLines().pop().action).toBe('updated_unverified');
 });
 
 test('updateDraft: andere status dan 204/200 telt niet als gelukt', async () => {
@@ -220,10 +239,11 @@ test('updateDraft verstuurt nooit iets en verwijdert niets', async () => {
 test.each([
   ['getThreads', { conversationId: '100' }, 'threads'],
   ['searchConversations', { status: 'active' }, 'conversations'],
+  ['searchInboxes', { query: '' }, 'mailboxes'],
 ])('%s meldt heeftMeer en gebruikt page of cursor', async (tool, args, key) => {
   fake.listResponse = { _embedded: { [key]: [] }, page: { number: 1, totalPages: 3 }, _links: { next: { href: 'https://api.helpscout.net/v2/x?page=2' } } };
   const r1 = await call(tool, args);
-  expect(r1).toMatchObject({ heeftMeer: true, volgendePagina: 2 });
+  expect(r1).toMatchObject({ heeftMeer: true, volgendePagina: 2, nextCursor: 'https://api.helpscout.net/v2/x?page=2' });
   const r3 = await call(tool, { ...args, cursor: 'https://api.helpscout.net/v2/x?page=3' });
   expect(r3).toMatchObject({ heeftMeer: false, volgendePagina: null });
   expect((helpScoutClient.get as jest.Mock).mock.calls.pop()[1]).toMatchObject({ page: 3 });

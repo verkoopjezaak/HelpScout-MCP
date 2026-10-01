@@ -51,12 +51,12 @@ import { join } from 'path';
 
 const DRAFT_PLACEHOLDER = '(Uitgaande e-mail - zie concept hieronder)';
 const draftLogPath = () => process.env.HELPSCOUT_DELETE_LOG || join(homedir(), '.local/state/helpscout-mcp/delete-draft.jsonl');
-/** Hash van alles wat Maarten aan een draft kan wijzigen: tekst, ontvangers, cc, bcc en bijlagen. */
+/** Hash van alles wat Maarten aan een draft kan wijzigen: tekst, ontvangers, cc, bcc, bijlagen en een geplande verzending. */
 function draftHash(t: any): string | null {
   if (typeof t?.body !== 'string') return null;
   const ids = (xs: any) => (Array.isArray(xs) ? xs.map((x: any) => (typeof x === 'string' ? x : x?.id ?? x?.email ?? JSON.stringify(x))).map(String).sort() : []);
   const atts = (t?._embedded?.attachments || []).map((a: any) => String(a?.id)).sort();
-  return createHash('sha256').update(JSON.stringify([t.body, ids(t.to), ids(t.cc), ids(t.bcc), atts])).digest('hex');
+  return createHash('sha256').update(JSON.stringify([t.body, ids(t.to), ids(t.cc), ids(t.bcc), atts, t.scheduled ?? null])).digest('hex');
 }
 /** Paginanummer uit expliciete page, of uit een eerder teruggegeven nextCursor (href met ?page=N). */
 function pageOf(input: { page?: number; cursor?: string }): number {
@@ -802,6 +802,7 @@ export class ToolHandler {
             query: input.query,
             totalFound: filteredInboxes.length,
             totalAvailable: inboxes.length,
+            nextCursor: response._links?.next?.href,
             ...moreInfo(response.page, response._links, pageOf(input)),
             usage: filteredInboxes.length > 0 ? 
               'NEXT STEP: Use the "id" field from these results in your conversation search tools (comprehensiveConversationSearch or searchConversations)' : 
@@ -1957,6 +1958,7 @@ export class ToolHandler {
     const problem = String(conv?.id) !== input.conversationId ? 'conversation-id wijkt af (samengevoegd of omgeleid)'
       : !target ? (totalPages > 1 ? 'thread niet gevonden op pagina 1 van deze conversation' : 'thread niet gevonden in deze conversation')
       : target.state !== 'draft' ? `thread is geen draft (state=${target.state}); verstuurde of gepubliceerde berichten worden nooit gewijzigd of verwijderd`
+      : target.scheduled ? 'draft is ingepland om te versturen (scheduled); geplande berichten worden nooit gewijzigd of verwijderd'
       : typeof target.body !== 'string' ? 'draft heeft geen tekstveld body; ongeldige respons'
       : null;
     return { input, log, refuse, result, sha, fetchThreads, fingerprint, conv, threads, totalPages, target, problem, logPath };
@@ -1969,16 +1971,22 @@ export class ToolHandler {
     if (totalPages !== 1) return refuse(`paginering niet eenduidig (totalPages=${totalPages}); geen conceptconversatie`, draftText);
     // Harde grens: alleen een conceptconversatie. Naast drafts mag er hooguit de placeholder van createDraftConversation
     // en systeemregels (lineitem) staan; elk verstuurd bericht, elke klantmail en elke notitie betekent weigeren.
+    // De placeholder telt alleen als hij via de API is aangemaakt (source.type api), nooit een ontvangen klantmail met toevallig dezelfde tekst.
     const others = threads.filter(t => t.state !== 'draft' && t.type !== 'lineitem');
-    const conceptOnly = others.length <= 1 && others.every(t => t.type === 'customer' && String(t.body ?? '').trim() === DRAFT_PLACEHOLDER);
+    const conceptOnly = others.length <= 1 && others.every(t => t.type === 'customer' && t.source?.type === 'api' && String(t.body ?? '').trim() === DRAFT_PLACEHOLDER);
     if (!conceptOnly) return refuse('draft staat in een echte conversation (verstuurd bericht, klantbericht of notitie); de Help Scout API kan een losse draft-thread niet verwijderen (DELETE thread geeft 400). Corrigeer de tekst met updateDraft of verwijder het concept in de browser.', draftText);
+    const allDrafts = threads.filter(t => t.state === 'draft');
+    // Alles wat mee verdwijnt moet vooraf volledig in het log staan, en niets mag ingepland zijn.
+    if (allDrafts.some(t => typeof t.body !== 'string')) return refuse('een andere draft in deze conversation heeft geen tekstveld body; niet volledig te loggen, niets verwijderd', draftText);
+    if (allDrafts.some(t => t.scheduled)) return refuse('een draft in deze conversation is ingepland om te versturen; niets verwijderd', draftText);
     const tags: string[] = (conv?.tags || []).map((t: any) => t?.tag ?? t?.name ?? String(t));
-    const drafts = threads.filter(t => t.state === 'draft').map(t => ({ threadId: String(t.id), text: t.body ?? null, to: t.to ?? null, cc: t.cc ?? null, bcc: t.bcc ?? null }));
+    const drafts = allDrafts.map(t => ({ threadId: String(t.id), text: t.body, to: t.to ?? null, cc: t.cc ?? null, bcc: t.bcc ?? null }));
 
     // Write-ahead: volledige tekst plus reden staat op schijf voordat er iets verdwijnt.
     log({ action: 'deleting', callerReason: input.reason, subject: conv?.subject ?? null, tags, drafts });
     // Vlak voor de DELETE opnieuw lezen: is er intussen iets veranderd (verstuurd, bewerkt, klantreactie), dan stoppen.
     // ponytail: restvenster van milliseconden tussen herlezen en DELETE; de API kent geen voorwaardelijke DELETE.
+    // De DELETE zelf wordt niet automatisch herhaald (patchStatus/delete zonder retry), zodat het venster niet groeit.
     const again = await fetchThreads();
     if (again.totalPages !== 1 || fingerprint(again.threads) !== fingerprint(threads)) return refuse('conversation is veranderd tussen controle en verwijderen; niets verwijderd', draftText);
     let status: number;
@@ -2018,9 +2026,15 @@ export class ToolHandler {
       return result({ success: false, updated: false, reason: `Help Scout gaf HTTP ${status} in plaats van 204`, draftText: oldText });
     }
     const after = (await fetchThreads()).threads.find(t => String(t.id) === input.threadId);
-    const stillDraft = after?.state === 'draft';
-    log({ action: 'updated_draft', httpStatus: status, stillDraft, textMatches: after?.body === newText });
-    return result({ success: true, updated: true, method: 'PATCH /v2/conversations/{id}/threads/{threadId} /text', conversationId: input.conversationId, threadId: input.threadId, stillDraft, oldText, newText: after?.body ?? null, logPath });
+    const stillDraft = after?.state === 'draft' && !after?.scheduled;
+    const textMatches = after?.body === newText;
+    const verified = stillDraft && textMatches;
+    log({ action: verified ? 'updated_draft' : 'updated_unverified', httpStatus: status, stillDraft, textMatches });
+    return result({
+      success: verified, updated: true, verified, method: 'PATCH /v2/conversations/{id}/threads/{threadId} /text',
+      warning: verified ? undefined : (stillDraft ? 'PATCH gaf 204 maar de tekst wijkt af na herlezen; controleer het concept handmatig' : 'LET OP: de thread is na de PATCH geen draft meer (verstuurd of ingepland); meld dit direct aan Maarten'),
+      conversationId: input.conversationId, threadId: input.threadId, stillDraft, oldText, newText: after?.body ?? null, logPath,
+    });
   }
 
 }
