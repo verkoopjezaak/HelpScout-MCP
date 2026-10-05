@@ -2012,6 +2012,8 @@ export class ToolHandler {
     // Write-ahead: oude en nieuwe tekst plus reden op schijf voordat er iets verandert.
     log({ action: 'updating', callerReason: input.reason, subject: conv?.subject ?? null, oldText, newText, to: target.to ?? null, cc: target.cc ?? null, bcc: target.bcc ?? null });
     // Vlak voor de PATCH opnieuw lezen: verstuurd of intussen bewerkt betekent stoppen.
+    // ponytail: restvenster van milliseconden tussen herlezen en PATCH; de API kent geen voorwaardelijke PATCH (Sol 05-10).
+    // Wordt de thread in dat venster verstuurd, dan vangt de nacontrole het (stillDraft=false) en meldt het luid.
     const before = (await fetchThreads()).threads.find(t => String(t.id) === input.threadId);
     if (!before || before.state !== 'draft' || draftHash(before) !== draftHash(target)) return refuse('draft is veranderd of verstuurd tussen controle en wijzigen; niets gewijzigd', oldText);
     let status: number;
